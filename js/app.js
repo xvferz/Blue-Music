@@ -334,51 +334,63 @@ class MusicPlayer {
     section.style.display = 'block';
     container.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner"></i><p>Mencari...</p></div>';
 
-    const tracks = await this.youtube.search(query, 30);
-    this.dom.exploreResultCount.textContent = `${tracks.length} hasil`;
+    // BUNGKUS DENGAN TRY...CATCH
+    try {
+      const tracks = await this.youtube.search(query, 30);
+      this.dom.exploreResultCount.textContent = `${tracks.length} hasil`;
 
-    if (!tracks.length) {
-      container.innerHTML = '<div class="empty-state"><i class="fas fa-search"></i><p>Tidak ditemukan hasil. Coba kata kunci lain.</p></div>';
-      return;
-    }
+      if (!tracks.length) {
+        container.innerHTML = '<div class="empty-state"><i class="fas fa-search"></i><p>Tidak ditemukan hasil. Coba kata kunci lain.</p></div>';
+        return;
+      }
 
-    this.onlineTracks = tracks;
+      this.onlineTracks = tracks;
 
-    container.innerHTML = tracks.map((track, i) => {
-      const duration = track.duration ? this.formatTime(track.duration) : '--:--';
-      return `
-        <div class="track-item" data-online-id="${track.id}">
-          <span class="track-index">${i + 1}</span>
-          <div class="track-info">
-            <div class="track-name">${this.highlightMatch(this.escapeHtml(track.title), query)}</div>
-            <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
-          </div>
-          <span class="track-duration">${duration}</span>
-          <div class="track-actions">
-            <button class="track-dl-btn" data-online-id="${track.id}" title="Download">
-              <i class="fas fa-download"></i>
-            </button>
-          </div>
+      container.innerHTML = tracks.map((track, i) => {
+        const duration = track.duration ? this.formatTime(track.duration) : '--:--';
+        return `
+          <div class="track-item" data-online-id="${track.id}">
+            <span class="track-index">${i + 1}</span>
+            <div class="track-info">
+              <div class="track-name">${this.highlightMatch(this.escapeHtml(track.title), query)}</div>
+              <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
+            </div>
+            <span class="track-duration">${duration}</span>
+            <div class="track-actions">
+              <button class="track-dl-btn" data-online-id="${track.id}" title="Download">
+                <i class="fas fa-download"></i>
+              </button>
+            </div>
+          </div>`;
+      }).join('');
+
+      container.querySelectorAll('.track-item').forEach(el => {
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('.track-actions')) return;
+          const track = this.onlineTracks.find(t => t.id === el.dataset.onlineId);
+          if (track) this.playOnlineTrack(track);
+        });
+      });
+
+      container.querySelectorAll('.track-dl-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const track = this.onlineTracks.find(t => t.id === btn.dataset.onlineId);
+          if (track) await this.downloadOnlineTrack(track);
+        });
+      });
+      
+    } catch (error) {
+      // TAMPILKAN PESAN ERROR JIKA GAGAL
+      container.innerHTML = `
+        <div class="empty-state">
+          <i class="fas fa-exclamation-triangle"></i>
+          <p>Gagal mencari lagu.</p>
+          <p style="font-size:13px;margin-top:8px">Pastikan koneksi internet stabil atau coba lagi nanti.</p>
         </div>`;
-    }).join('');
-
-    container.querySelectorAll('.track-item').forEach(el => {
-      el.addEventListener('click', (e) => {
-        if (e.target.closest('.track-actions')) return;
-        const track = this.onlineTracks.find(t => t.id === el.dataset.onlineId);
-        if (track) this.playOnlineTrack(track);
-      });
-    });
-
-    container.querySelectorAll('.track-dl-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const track = this.onlineTracks.find(t => t.id === btn.dataset.onlineId);
-        if (track) await this.downloadOnlineTrack(track);
-      });
-    });
+      console.error(error);
+    }
   }
-
   async playOnlineTrack(track) {
     if (this.audioCtx && this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
