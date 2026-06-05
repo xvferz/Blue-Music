@@ -1,18 +1,18 @@
 class YouTubeMusicAPI {
   constructor() {
+    // Update dengan server Invidious yang masih aktif saat ini
     this.instances = [
-      'https://inv.nadeko.net',
-      'https://invidious.snopyta.org',
-      'https://yewtu.be',
-      'https://inv.riverside.rocks',
-      'https://invidious.private.coffee',
-      'https://invidious.xyz',
+      'https://iv.ggtyler.dev',
+      'https://invidious.nerdvpn.de',
+      'https://inv.tux.pizza',
+      'https://invidious.privacydev.net',
+      'https://invidious.fdn.fr'
     ];
 
+    // Hapus proxy yang butuh API key, gunakan yang publik
     this.proxies = [
-      'https://corsproxy.io/?',
       'https://api.allorigins.win/raw?url=',
-      'https://proxy.cors.sh/',
+      'https://corsproxy.io/?'
     ];
 
     this.instanceIndex = 0;
