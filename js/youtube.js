@@ -126,56 +126,49 @@ class YouTubeMusicAPI {
   }
 
   // =========================================================================
-  // 🔥 SOLUSI HYBRID: GUNAKAN PIPED API KHUSUS UNTUK MEMUTAR AUDIO (Bypass CORS)
+  // 🔥 SOLUSI PAMUNGKAS: PENGAMBILAN AUDIO DENGAN PROXY INVIDIOUS
   // =========================================================================
   async getAudioStreamUrl(videoId) {
-    try {
-      // Daftar server Piped yang handal untuk proxy audio
-      const pipedInstances = [
-        'https://pipedapi.kavin.rocks',
-        'https://pipedapi.tokhmi.xyz',
-        'https://pipedapi.smnz.de'
-      ];
+    console.log("Mencari jalur rahasia untuk audio...");
+    
+    // Daftar server "tahan banting" yang diketahui mengizinkan proxy audio
+    const streamingServers = [
+      this.instances[this.instanceIndex], // Prioritaskan server yang sedang aktif
+      'https://inv.nadeko.net',
+      'https://invidious.nerdvpn.de',
+      'https://inv.tux.pizza',
+      'https://vid.puffyan.us'
+    ];
 
-      let streamData = null;
+    for (const server of streamingServers) {
+      if (!server) continue;
+      
+      // KUNCI UTAMA: itag=140 (format M4A ringan) & local=true
+      // local=true memaksa server ini menjadi "kurir" agar Google tidak memblokir IP-mu
+      const proxyUrl = `${server}/latest_version?id=${videoId}&itag=140&local=true`;
+      
+      try {
+        // TEKNIK PANCINGAN: 
+        // Kita tidak langsung mendownload, tapi mengetuk pintu servernya 
+        // dengan meminta 2 byte pertama lagu tersebut. Ini diproses dalam hitungan milidetik.
+        const check = await this.fetchWithTimeout(proxyUrl, {
+          method: 'GET',
+          headers: { 'Range': 'bytes=0-1' } 
+        }, 3000);
 
-      // Coba tembak server Piped satu per satu
-      for (const api of pipedInstances) {
-        try {
-          const res = await this.fetchWithTimeout(`${api}/streams/${videoId}`, {
-            headers: { 'Accept': 'application/json' }
-          }, 6000); // Beri waktu 6 detik karena dia harus membedah signature YouTube
-
-          if (res.ok) {
-            streamData = await res.json();
-            if (streamData && streamData.audioStreams && streamData.audioStreams.length > 0) {
-              break; // Berhasil dapat stream! Keluar dari loop.
-            }
-          }
-        } catch (e) {
-          console.warn(`[Piped] Gagal mengambil stream dari ${api}`);
+        // Jika server membalas dengan OK (200) atau Partial (206), berarti jalurnya aman!
+        if (check.ok || check.status === 206) {
+          console.log(`Jalur audio berhasil ditemukan di: ${server}`);
+          return proxyUrl; // Berikan URL ini ke mesin pemutar musik
         }
+      } catch (e) {
+        console.warn(`Jalur ${server} sedang macet, mencoba server berikutnya...`);
       }
-
-      if (!streamData || !streamData.audioStreams || streamData.audioStreams.length === 0) {
-        throw new Error('Tidak ada stream audio yang tersedia saat ini.');
-      }
-
-      // Urutkan kualitas dari yang paling tinggi (bitrate) ke terendah
-      const audioFormats = streamData.audioStreams.sort((a, b) => b.bitrate - a.bitrate);
-
-      // Cari format m4a/mp4 terlebih dahulu karena lebih stabil di semua browser (termasuk Safari)
-      // Jika tidak ada, pakai format webm
-      const bestAudio = audioFormats.find(f => f.mimeType.includes('mp4')) || audioFormats[0];
-
-      return bestAudio.url;
-
-    } catch (err) {
-      console.error('Gagal mengambil jalur stream alternatif:', err);
-      throw err;
     }
-  }
 
+    // Jika kelima server di atas kebetulan down bersamaan
+    throw new Error('Semua jalur streaming sedang dijaga ketat oleh YouTube. Coba lagu lain.');
+  }
   // --- DOWNLOAD AUDIO ---
   async downloadAudio(videoId) {
     const streamUrl = await this.getAudioStreamUrl(videoId);
