@@ -1,6 +1,5 @@
 class YouTubeMusicAPI {
   constructor() {
-    // Ini hanya server cadangan (fallback) jika sistem gagal mencari server baru
     this.instances = [
       'https://vid.puffyan.us',
       'https://inv.nadeko.net',
@@ -13,34 +12,30 @@ class YouTubeMusicAPI {
     ];
 
     this.instanceIndex = 0;
-    this.isInitialized = false; // Penanda apakah kita sudah mencari server dinamis
+    this.isInitialized = false;
   }
 
-  // --- FITUR BARU: MENCARI SERVER YANG HIDUP HARI INI ---
+  // --- MENCARI SERVER INVIDIOUS YANG AKTIF (Untuk Pencarian) ---
   async fetchActiveInstances() {
     try {
-      console.log("Mencari server Invidious yang sedang aktif...");
-      // Tanya ke pusat data Invidious
+      console.log("Mencari server pencarian aktif...");
       const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
       const data = await res.json();
       
-      // Filter hanya server yang aman (https), API-nya nyala, dan mengizinkan lintas-domain (CORS)
       const validInstances = data
         .filter(item => item[1].type === 'https' && item[1].api === true && item[1].cors === true)
         .map(item => item[1].uri);
 
       if (validInstances.length > 0) {
-        // Timpa server cadangan dengan server yang 100% fresh
         this.instances = validInstances;
-        console.log(`Berhasil menemukan ${validInstances.length} server aktif!`);
       }
     } catch (err) {
-      console.warn('Gagal mengambil server dinamis, menggunakan server cadangan.');
+      console.warn('Gagal mengambil server pencarian dinamis.');
     }
     this.isInitialized = true;
   }
 
-  // Fungsi Timeout
+  // --- FUNGSI TIMEOUT ---
   async fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -54,31 +49,24 @@ class YouTubeMusicAPI {
     }
   }
 
-  // Fungsi Pengambil Data Utama
+  // --- FUNGSI REQUEST UTAMA ---
   async fetchJSON(endpoint) {
-    // Pastikan kita sudah punya daftar server fresh sebelum mulai mencari lagu
     if (!this.isInitialized) {
       await this.fetchActiveInstances();
     }
 
-    const maxRetries = Math.min(this.instances.length, 5); // Maksimal coba 5 server berbeda
+    const maxRetries = Math.min(this.instances.length, 5);
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const currentInstance = this.instances[this.instanceIndex];
 
-      // 1. Coba jalur langsung
       try {
-        const url = `${currentInstance}${endpoint}`;
-        const res = await this.fetchWithTimeout(url, {
+        const res = await this.fetchWithTimeout(`${currentInstance}${endpoint}`, {
           headers: { 'Accept': 'application/json' }
         }, 4000);
-
         if (res.ok) return await res.json();
-      } catch (e) {
-        // Gagal jalur langsung, lanjut ke proxy
-      }
+      } catch (e) {}
 
-      // 2. Coba pakai proxy jika jalur langsung diblokir (CORS)
       for (let p = 0; p < this.proxies.length; p++) {
         try {
           const proxyUrl = this.proxies[p];
@@ -95,19 +83,14 @@ class YouTubeMusicAPI {
             const text = await res.text();
             try { return JSON.parse(text); } catch (err) {}
           }
-        } catch (e) {
-          // Proxy gagal, lanjut proxy berikutnya
-        }
+        } catch (e) {}
       }
-
-      // 3. Pindah ke server lain jika server ini dan proxynya gagal semua
       this.instanceIndex = (this.instanceIndex + 1) % this.instances.length;
     }
-
-    throw new Error('Semua server sedang sibuk/down. Coba lagi nanti.');
+    throw new Error('Server pencarian sedang sibuk/down.');
   }
 
-  // Mapping Data Video
+  // --- MAPPING METADATA ---
   mapVideo(v) {
     const thumbs = v.videoThumbnails || [];
     thumbs.sort((a, b) => (b.width || 0) - (a.width || 0));
@@ -130,68 +113,70 @@ class YouTubeMusicAPI {
     };
   }
 
-  // Fungsi Pencarian
   async search(query, limit = 30) {
-    try {
-      const data = await this.fetchJSON(
-        `/api/v1/search?q=${encodeURIComponent(query)}&type=video&page=1&sort=relevance`
-      );
-      if (!Array.isArray(data)) return [];
-      return data
-        .filter(item => item.type === 'video' && item.videoId)
-        .slice(0, limit)
-        .map(v => this.mapVideo(v));
-    } catch (err) {
-      console.error('Search gagal:', err);
-      throw err; 
-    }
+    const data = await this.fetchJSON(`/api/v1/search?q=${encodeURIComponent(query)}&type=video&page=1&sort=relevance`);
+    if (!Array.isArray(data)) return [];
+    return data.filter(item => item.type === 'video' && item.videoId).slice(0, limit).map(v => this.mapVideo(v));
   }
 
-  // Dapatkan Info Video
-  async getVideoInfo(videoId) {
-    try {
-      return await this.fetchJSON(`/api/v1/videos/${videoId}`);
-    } catch (err) {
-      console.error('Video info gagal:', err);
-      return null;
-    }
-  }
-
-  // Dapatkan URL Audio Streaming
-  async getAudioStreamUrl(videoId) {
-    const data = await this.getVideoInfo(videoId);
-    if (!data || !Array.isArray(data.adaptiveFormats)) {
-      throw new Error('Tidak ada format audio');
-    }
-
-    const audioFormats = data.adaptiveFormats.filter(f =>
-      f.mimeType && f.mimeType.startsWith('audio/')
-    );
-
-    if (audioFormats.length === 0) {
-      throw new Error('Tidak ada format audio ditemukan');
-    }
-
-    audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    return audioFormats[0].url;
-  }
-
-  // Dapatkan Daftar Trending
   async getTrending() {
+    const data = await this.fetchJSON('/api/v1/trending?type=music');
+    if (!Array.isArray(data)) return [];
+    return data.filter(v => v.videoId).slice(0, 24).map(v => this.mapVideo(v));
+  }
+
+  // =========================================================================
+  // 🔥 SOLUSI HYBRID: GUNAKAN PIPED API KHUSUS UNTUK MEMUTAR AUDIO (Bypass CORS)
+  // =========================================================================
+  async getAudioStreamUrl(videoId) {
     try {
-      const data = await this.fetchJSON('/api/v1/trending?type=music');
-      if (!Array.isArray(data)) return [];
-      return data
-        .filter(v => v.videoId)
-        .slice(0, 24)
-        .map(v => this.mapVideo(v));
+      // Daftar server Piped yang handal untuk proxy audio
+      const pipedInstances = [
+        'https://pipedapi.kavin.rocks',
+        'https://pipedapi.tokhmi.xyz',
+        'https://pipedapi.smnz.de'
+      ];
+
+      let streamData = null;
+
+      // Coba tembak server Piped satu per satu
+      for (const api of pipedInstances) {
+        try {
+          const res = await this.fetchWithTimeout(`${api}/streams/${videoId}`, {
+            headers: { 'Accept': 'application/json' }
+          }, 6000); // Beri waktu 6 detik karena dia harus membedah signature YouTube
+
+          if (res.ok) {
+            streamData = await res.json();
+            if (streamData && streamData.audioStreams && streamData.audioStreams.length > 0) {
+              break; // Berhasil dapat stream! Keluar dari loop.
+            }
+          }
+        } catch (e) {
+          console.warn(`[Piped] Gagal mengambil stream dari ${api}`);
+        }
+      }
+
+      if (!streamData || !streamData.audioStreams || streamData.audioStreams.length === 0) {
+        throw new Error('Tidak ada stream audio yang tersedia saat ini.');
+      }
+
+      // Urutkan kualitas dari yang paling tinggi (bitrate) ke terendah
+      const audioFormats = streamData.audioStreams.sort((a, b) => b.bitrate - a.bitrate);
+
+      // Cari format m4a/mp4 terlebih dahulu karena lebih stabil di semua browser (termasuk Safari)
+      // Jika tidak ada, pakai format webm
+      const bestAudio = audioFormats.find(f => f.mimeType.includes('mp4')) || audioFormats[0];
+
+      return bestAudio.url;
+
     } catch (err) {
-      console.error('Trending gagal:', err);
+      console.error('Gagal mengambil jalur stream alternatif:', err);
       throw err;
     }
   }
 
-  // Download Audio
+  // --- DOWNLOAD AUDIO ---
   async downloadAudio(videoId) {
     const streamUrl = await this.getAudioStreamUrl(videoId);
 
