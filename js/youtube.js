@@ -1,11 +1,10 @@
 class YouTubeMusicAPI {
   constructor() {
+    // Ini hanya server cadangan (fallback) jika sistem gagal mencari server baru
     this.instances = [
-      'https://iv.ggtyler.dev',
-      'https://invidious.nerdvpn.de',
-      'https://inv.tux.pizza',
-      'https://invidious.privacydev.net',
-      'https://invidious.fdn.fr'
+      'https://vid.puffyan.us',
+      'https://inv.nadeko.net',
+      'https://invidious.lunar.icu'
     ];
 
     this.proxies = [
@@ -14,8 +13,31 @@ class YouTubeMusicAPI {
     ];
 
     this.instanceIndex = 0;
-    this.proxyIndex = -1;
-    this.useProxy = false;
+    this.isInitialized = false; // Penanda apakah kita sudah mencari server dinamis
+  }
+
+  // --- FITUR BARU: MENCARI SERVER YANG HIDUP HARI INI ---
+  async fetchActiveInstances() {
+    try {
+      console.log("Mencari server Invidious yang sedang aktif...");
+      // Tanya ke pusat data Invidious
+      const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
+      const data = await res.json();
+      
+      // Filter hanya server yang aman (https), API-nya nyala, dan mengizinkan lintas-domain (CORS)
+      const validInstances = data
+        .filter(item => item[1].type === 'https' && item[1].api === true && item[1].cors === true)
+        .map(item => item[1].uri);
+
+      if (validInstances.length > 0) {
+        // Timpa server cadangan dengan server yang 100% fresh
+        this.instances = validInstances;
+        console.log(`Berhasil menemukan ${validInstances.length} server aktif!`);
+      }
+    } catch (err) {
+      console.warn('Gagal mengambil server dinamis, menggunakan server cadangan.');
+    }
+    this.isInitialized = true;
   }
 
   // Fungsi Timeout
@@ -34,7 +56,12 @@ class YouTubeMusicAPI {
 
   // Fungsi Pengambil Data Utama
   async fetchJSON(endpoint) {
-    const maxRetries = this.instances.length;
+    // Pastikan kita sudah punya daftar server fresh sebelum mulai mencari lagu
+    if (!this.isInitialized) {
+      await this.fetchActiveInstances();
+    }
+
+    const maxRetries = Math.min(this.instances.length, 5); // Maksimal coba 5 server berbeda
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const currentInstance = this.instances[this.instanceIndex];
@@ -48,10 +75,10 @@ class YouTubeMusicAPI {
 
         if (res.ok) return await res.json();
       } catch (e) {
-        console.warn(`[Direct] Gagal atau lambat di ${currentInstance}`);
+        // Gagal jalur langsung, lanjut ke proxy
       }
 
-      // 2. Coba pakai proxy jika jalur langsung diblokir
+      // 2. Coba pakai proxy jika jalur langsung diblokir (CORS)
       for (let p = 0; p < this.proxies.length; p++) {
         try {
           const proxyUrl = this.proxies[p];
@@ -66,20 +93,18 @@ class YouTubeMusicAPI {
 
           if (res.ok) {
             const text = await res.text();
-            try { 
-              return JSON.parse(text); 
-            } catch (err) {}
+            try { return JSON.parse(text); } catch (err) {}
           }
         } catch (e) {
-          console.warn(`[Proxy] Gagal menggunakan proxy ${this.proxies[p]}`);
+          // Proxy gagal, lanjut proxy berikutnya
         }
       }
 
-      // 3. Pindah ke server lain
+      // 3. Pindah ke server lain jika server ini dan proxynya gagal semua
       this.instanceIndex = (this.instanceIndex + 1) % this.instances.length;
     }
 
-    throw new Error('Semua server sedang down. Coba lagi nanti.');
+    throw new Error('Semua server sedang sibuk/down. Coba lagi nanti.');
   }
 
   // Mapping Data Video
@@ -118,7 +143,6 @@ class YouTubeMusicAPI {
         .map(v => this.mapVideo(v));
     } catch (err) {
       console.error('Search gagal:', err);
-      // Lempar error ke app.js agar UI menampilkan pesan gagal
       throw err; 
     }
   }
