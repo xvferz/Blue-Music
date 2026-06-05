@@ -37,16 +37,75 @@ class YouTubeMusicAPI {
     }
     return `${proxy}${url}`;
   }
+  // Fungsi baru untuk memaksa fetch berhenti jika terlalu lama (Timeout)
+  async fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(id);
+      return response;
+    } catch (error) {
+      clearTimeout(id);
+      throw error;
+    }
+  }
 
   async fetchJSON(endpoint) {
-    // Try direct first (in case instance has CORS)
-    if (!this.useProxy) {
+    // Batasi maksimal percobaan agar tidak terjadi infinite loop
+    const maxRetries = this.instances.length;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const currentInstance = this.instances[this.instanceIndex];
+
+      // 1. Coba jalur langsung (Direct) tanpa proxy (Batas waktu 4 detik)
       try {
-        const url = `${this.baseUrl}${endpoint}`;
-        const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const url = `${currentInstance}${endpoint}`;
+        const res = await this.fetchWithTimeout(url, {
+          headers: { 'Accept': 'application/json' }
+        }, 4000);
+
         if (res.ok) return await res.json();
-      } catch (_) {}
+      } catch (e) {
+        console.warn(`[Direct] Gagal atau lambat di ${currentInstance}`);
+      }
+
+      // 2. Jika jalur langsung diblokir (CORS), coba gunakan Proxy
+      for (let p = 0; p < this.proxies.length; p++) {
+        try {
+          const proxyUrl = this.proxies[p];
+          const targetUrl = `${currentInstance}${endpoint}`;
+          
+          // Format URL proxy
+          const finalUrl = proxyUrl.includes('?') 
+            ? `${proxyUrl}${encodeURIComponent(targetUrl)}` 
+            : `${proxyUrl}${targetUrl}`;
+
+          // Proxy kadang lebih lambat, kita kasih waktu 5 detik
+          const res = await this.fetchWithTimeout(finalUrl, {
+            headers: { 'Accept': 'application/json, text/plain, */*' }
+          }, 5000);
+
+          if (res.ok) {
+            const text = await res.text();
+            try { 
+              return JSON.parse(text); 
+            } catch (err) {
+              // Jika response proxy bukan JSON, abaikan
+            }
+          }
+        } catch (e) {
+          console.warn(`[Proxy] Gagal menggunakan proxy ${this.proxies[p]}`);
+        }
+      }
+
+      // 3. Jika Direct dan semua Proxy gagal, pindah ke server Invidious berikutnya
+      this.instanceIndex = (this.instanceIndex + 1) % this.instances.length;
     }
+
+    // Jika kode sampai di sini, artinya semua server sudah dicoba dan gagal
+    throw new Error('Semua server sedang down. Coba lagi nanti.');
+  }
 
     // Try each proxy
     for (let p = 0; p < this.proxies.length; p++) {
