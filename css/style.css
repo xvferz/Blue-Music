@@ -1298,3 +1298,16 @@ html, body {
     display: none;
   }
 }
+
+/* ==== YouTube IFrame Player tersembunyi (fallback pemutaran) ==== */
+.yt-embed-host {
+  position: fixed;
+  width: 2px;
+  height: 2px;
+  left: -20px;
+  bottom: -20px;
+  opacity: 0.01;
+  pointer-events: none;
+  border: 0;
+  z-index: -1;
+}

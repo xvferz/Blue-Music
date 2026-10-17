@@ -1,11 +1,13 @@
 class MusicPlayer {
   constructor() {
-    this.audio = new Audio();
+    this.player = new PlaybackEngine();
     this.tracks = [];
     this.onlineTracks = [];
     this.playlists = { all: [], liked: [] };
     this.currentIndex = -1;
     this.isPlaying = false;
+    this.isLoadingTrack = false;
+    this.streamFallbackAttempted = false;
     this.shuffleOn = false;
     this.repeatMode = 'off';
     this.volume = 0.7;
@@ -97,10 +99,14 @@ class MusicPlayer {
   }
 
   bindEvents() {
-    this.audio.addEventListener('timeupdate', () => this.onTimeUpdate());
-    this.audio.addEventListener('loadedmetadata', () => this.onLoadedMetadata());
-    this.audio.addEventListener('ended', () => this.onTrackEnd());
-    this.audio.addEventListener('error', () => this.onAudioError());
+    this.player.on('timeupdate', () => this.onTimeUpdate());
+    this.player.on('loadedmetadata', () => this.onLoadedMetadata());
+    this.player.on('ended', () => this.onTrackEnd());
+    this.player.on('playing', () => this.onPlaying());
+    this.player.on('paused', () => this.onPaused());
+    this.player.on('localerror', () => this.onLocalError());
+    this.player.on('streamerror', () => this.onStreamError());
+    this.player.on('embederror', (code) => this.onEmbedError(code));
 
     this.dom.playBtn.addEventListener('click', () => this.togglePlay());
     this.dom.prevBtn.addEventListener('click', () => this.prevTrack());
@@ -162,8 +168,11 @@ class MusicPlayer {
 
   setupAudioContext() {
     try {
+      if (this.srcNode) return;
       this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      this.srcNode = this.audioCtx.createMediaElementSource(this.audio);
+      // Hanya elemen audio LOKAL yang dirouting ke Web Audio.
+      // Stream online (CORS-dirty) akan dibungkam kalau dirouting ke sini.
+      this.srcNode = this.audioCtx.createMediaElementSource(this.player.localAudio);
       this.analyser = this.audioCtx.createAnalyser();
       this.analyser.fftSize = 256;
       this.srcNode.connect(this.analyser);
@@ -198,12 +207,18 @@ class MusicPlayer {
       const tracks = await this.youtube.getTrending();
       this.renderOnlineCards(container, tracks);
     } catch (err) {
-      container.innerHTML = `
-        <div class="empty-state">
-          <i class="fas fa-cloud-upload-alt"></i>
-          <p>Gagal terhubung ke server YouTube.</p>
-          <p style="font-size:13px;margin-top:8px">Coba refresh halaman atau gunakan <strong>Cari</strong> di atas untuk mencari lagu.</p>
-        </div>`;
+      const recents = this.getRecentOnline();
+      if (recents.length) {
+        this.renderOnlineCards(container, recents);
+        this.showToast('Server trending sibuk — menampilkan lagu terakhir diputar');
+      } else {
+        container.innerHTML = `
+          <div class="empty-state">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <p>Gagal terhubung ke server YouTube.</p>
+            <p style="font-size:13px;margin-top:8px">Coba refresh halaman atau gunakan <strong>Cari</strong> di atas untuk mencari lagu.</p>
+          </div>`;
+      }
     }
   }
 
@@ -356,27 +371,13 @@ class MusicPlayer {
               <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
             </div>
             <span class="track-duration">${duration}</span>
-            <div class="track-actions">
-              <button class="track-dl-btn" data-online-id="${track.id}" title="Download">
-                <i class="fas fa-download"></i>
-              </button>
-            </div>
           </div>`;
       }).join('');
 
       container.querySelectorAll('.track-item').forEach(el => {
         el.addEventListener('click', (e) => {
-          if (e.target.closest('.track-actions')) return;
           const track = this.onlineTracks.find(t => t.id === el.dataset.onlineId);
           if (track) this.playOnlineTrack(track);
-        });
-      });
-
-      container.querySelectorAll('.track-dl-btn').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const track = this.onlineTracks.find(t => t.id === btn.dataset.onlineId);
-          if (track) await this.downloadOnlineTrack(track);
         });
       });
       
@@ -386,7 +387,8 @@ class MusicPlayer {
         <div class="empty-state">
           <i class="fas fa-exclamation-triangle"></i>
           <p>Gagal mencari lagu.</p>
-          <p style="font-size:13px;margin-top:8px">Pastikan koneksi internet stabil atau coba lagi nanti.</p>
+          <p style="font-size:13px;margin-top:8px">Server publik sedang tidak bisa diakses dari browser.</p>
+          <p style="font-size:13px;margin-top:4px">Tips: aktifkan pencarian yang andal dengan YouTube Data API key gratis — petunjuk ada di <code>js/youtube.js</code>.</p>
         </div>`;
       console.error(error);
     }
@@ -396,66 +398,51 @@ class MusicPlayer {
       this.audioCtx.resume();
     }
 
-    let streamUrl;
-    try {
-      streamUrl = await this.youtube.getAudioStreamUrl(track.videoId);
-    } catch (err) {
-      this.showToast('Gagal mendapatkan stream audio. Coba lagu lain.');
-      return;
+    // Daftarkan lagu ke daftar utama agar next/prev/playlist mengenalnya.
+    let entry = this.tracks.find(t => t.id === track.id);
+    if (!entry) {
+      entry = { ...track, source: 'youtube', isOnline: true, url: null };
+      this.tracks.push(entry);
+      this.playlists.all.push(entry);
     }
-
-    const localTrack = {
-      ...track,
-      source: 'youtube',
-      url: streamUrl,
-      streamUrl: streamUrl,
-      isOnline: true,
-    };
-
-    if (!this.tracks.find(t => t.id === track.id)) {
-      this.tracks.push(localTrack);
-      this.playlists.all.push(localTrack);
-    }
-
-    const found = this.tracks.find(t => t.id === track.id);
-    this.currentIndex = this.tracks.indexOf(found || localTrack);
-    if (this.currentIndex === -1) this.currentIndex = this.tracks.length - 1;
-
-    this.audio.src = streamUrl;
-    this.audio.crossOrigin = 'anonymous';
-    this.audio.load();
-
-    try {
-      await this.audio.play();
-      this.isPlaying = true;
-    } catch (err) {
-      this.showToast('Gagal memutar. Coba lagu lain atau refresh halaman.');
-      return;
-    }
-
+    this.currentIndex = this.tracks.indexOf(entry);
+    this.isLoadingTrack = true;
+    this.streamFallbackAttempted = false;
     this.updatePlayerUI();
     this.render();
+
+    // Jalur 1: stream langsung via Invidious (kualitas & kontrol penuh).
+    const candidates = this.youtube.getStreamUrls(track.videoId);
+    const result = await this.player.playStream(candidates);
+
+    if (result.aborted) return;
+
+    if (result.ok) {
+      this.youtube.rememberStreamInstance(result.instance);
+      this.isLoadingTrack = false;
+      this.isPlaying = true;
+      this.updatePlayerUI();
+      this.render();
+      return;
+    }
+
+    // Jalur 2: embed YouTube — (hampir) selalu bisa memutar.
+    console.warn('[Player] Tidak ada server stream yang bekerja, beralih ke embed.');
+    try {
+      await this.player.playEmbed(track.videoId);
+      this.isLoadingTrack = false;
+      this.isPlaying = true;
+      this.updatePlayerUI();
+      this.render();
+    } catch (err) {
+      this.isLoadingTrack = false;
+      this.showToast('Semua jalur pemutaran gagal. Coba lagu lain.');
+      this.updatePlayerUI();
+    }
   }
 
   async downloadOnlineTrack(track) {
-    this.showToast(`Mengunduh ${track.title}...`);
-
-    try {
-      const blob = await this.youtube.downloadAudio(track.videoId);
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${track.artist} - ${track.title}.mp3`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      this.showToast(`Terunduh: ${track.title}`);
-    } catch (err) {
-      this.showToast('Gagal mengunduh. Coba lagi.');
-    }
+    this.showToast('Download hanya tersedia untuk musik lokal.');
   }
 
   // --- Local File Handling ---
@@ -528,13 +515,11 @@ class MusicPlayer {
     const track = this.tracks[index];
 
     if (track.isOnline) {
-      this.playOnlineTrack(this.onlineTracks.find(t2 => t2.id === track.id) || track);
+      this.playOnlineTrack(track);
       return;
     }
 
-    this.audio.src = track.url;
-    this.audio.load();
-    this.audio.play()
+    this.player.playLocal(track.url)
       .then(() => {
         this.isPlaying = true;
         this.updatePlayerUI();
@@ -557,15 +542,14 @@ class MusicPlayer {
     }
 
     if (this.isPlaying) {
-      this.audio.pause();
+      this.player.pause();
       this.isPlaying = false;
     } else {
       if (this.audioCtx && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume();
       }
-      this.audio.play()
-        .then(() => { this.isPlaying = true; })
-        .catch((err) => { console.warn('Gagal memutar:', err); });
+      this.player.resume();
+      this.isPlaying = true;
     }
     this.updatePlayerUI();
     this.render();
@@ -574,8 +558,8 @@ class MusicPlayer {
   prevTrack() {
     if (this.tracks.length === 0) return;
 
-    if (this.audio.currentTime > 3) {
-      this.audio.currentTime = 0;
+    if (this.player.currentTime > 3) {
+      this.player.currentTime = 0;
       return;
     }
 
@@ -643,7 +627,7 @@ class MusicPlayer {
 
   toggleMute() {
     this.isMuted = !this.isMuted;
-    this.audio.muted = this.isMuted;
+    this.player.setMuted(this.isMuted);
     this.dom.muteBtn.innerHTML = this.isMuted
       ? '<i class="fas fa-volume-mute"></i>'
       : `<i class="fas fa-volume-${this.volume > 0.5 ? 'up' : this.volume > 0 ? 'down' : 'off'}"></i>`;
@@ -671,13 +655,13 @@ class MusicPlayer {
   seek(e) {
     const rect = this.dom.progressBar.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    this.audio.currentTime = ratio * this.audio.duration;
+    this.player.currentTime = ratio * this.player.duration;
   }
 
   setVolume(e) {
     const rect = this.dom.volumeBar.getBoundingClientRect();
     this.volume = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    this.audio.volume = this.volume;
+    this.player.setVolume(this.volume);
     this.updateVolumeUI();
   }
 
@@ -689,7 +673,7 @@ class MusicPlayer {
 
     const track = this.tracks[this.currentIndex];
     if (track.isOnline) {
-      this.downloadOnlineTrack(this.onlineTracks.find(t2 => t2.id === track.id) || track);
+      this.showToast('Download hanya tersedia untuk musik lokal.');
       return;
     }
 
@@ -705,40 +689,80 @@ class MusicPlayer {
   // --- Audio Events ---
 
   onTimeUpdate() {
-    if (!this.audio.duration) return;
-    const ratio = this.audio.currentTime / this.audio.duration;
+    const duration = this.player.duration;
+    if (!duration) return;
+    const ratio = this.player.currentTime / duration;
     this.dom.progressFill.style.width = `${ratio * 100}%`;
-    this.dom.currentTime.textContent = this.formatTime(this.audio.currentTime);
+    this.dom.currentTime.textContent = this.formatTime(this.player.currentTime);
+    this.dom.totalTime.textContent = this.formatTime(duration);
   }
 
   onLoadedMetadata() {
-    this.dom.totalTime.textContent = this.formatTime(this.audio.duration);
-    if (this.tracks[this.currentIndex]) {
-      this.tracks[this.currentIndex].duration = this.audio.duration;
+    const duration = this.player.duration;
+    if (duration && this.tracks[this.currentIndex]) {
+      this.tracks[this.currentIndex].duration = duration;
     }
+    this.dom.totalTime.textContent = this.formatTime(duration);
     this.render();
+  }
+
+  onPlaying() {
+    this.isPlaying = true;
+    this.isLoadingTrack = false;
+    const track = this.tracks[this.currentIndex];
+    if (track && track.isOnline) this.saveRecentOnline(track);
+    this.updatePlayerUI();
+    this.render();
+  }
+
+  onPaused() {
+    this.isPlaying = false;
+    this.updatePlayerUI();
   }
 
   onTrackEnd() {
     if (this.repeatMode === 'one') {
-      this.audio.currentTime = 0;
-      this.audio.play();
+      this.player.currentTime = 0;
+      this.player.resume();
     } else {
       this.nextTrack();
     }
   }
 
-  onAudioError() {
+  onLocalError() {
+    this.isLoadingTrack = false;
+    this.showToast('Gagal memuat file audio. Format tidak didukung.');
+    this.nextTrack();
+  }
+
+  onStreamError() {
+    // Stream putus di tengah lagu — lanjutkan lewat embed dengan lagu yang sama.
+    const track = this.tracks[this.currentIndex];
+    if (!track || !track.isOnline || this.streamFallbackAttempted) return;
+    this.streamFallbackAttempted = true;
+    console.warn('[Player] Stream terputus, beralih ke embed…');
+    this.isLoadingTrack = true;
+    this.updatePlayerUI();
+    this.player.playEmbed(track.videoId)
+      .then(() => {
+        this.isLoadingTrack = false;
+        this.updatePlayerUI();
+      })
+      .catch(() => {
+        this.isLoadingTrack = false;
+        this.showToast('Streaming terputus. Coba lagu lain.');
+        this.updatePlayerUI();
+      });
+  }
+
+  onEmbedError(code) {
+    this.isLoadingTrack = false;
     const track = this.tracks[this.currentIndex];
     if (track && track.isOnline) {
-      this.showToast('Gagal streaming dari YouTube. Coba lagu lain atau refresh.');
-      if (this.audio.src) {
-        this.audio.src = '';
-      }
-    } else {
-      this.showToast('Gagal memuat file audio. Format tidak didukung.');
+      console.warn('[Player] Embed error, kode:', code);
+      this.showToast('Lagu ini tidak bisa diputar (dibatasi YouTube). Melewati…');
+      this.nextTrack();
     }
-    this.nextTrack();
   }
 
   handleKeyboard(e) {
@@ -749,21 +773,21 @@ class MusicPlayer {
         this.togglePlay();
         break;
       case 'ArrowLeft':
-        this.audio.currentTime = Math.max(0, this.audio.currentTime - 5);
+        this.player.currentTime = Math.max(0, this.player.currentTime - 5);
         break;
       case 'ArrowRight':
-        this.audio.currentTime = Math.min(this.audio.duration, this.audio.currentTime + 5);
+        this.player.currentTime = Math.min(this.player.duration, this.player.currentTime + 5);
         break;
       case 'ArrowUp':
         e.preventDefault();
         this.volume = Math.min(1, this.volume + 0.05);
-        this.audio.volume = this.volume;
+        this.player.setVolume(this.volume);
         this.updateVolumeUI();
         break;
       case 'ArrowDown':
         e.preventDefault();
         this.volume = Math.max(0, this.volume - 0.05);
-        this.audio.volume = this.volume;
+        this.player.setVolume(this.volume);
         this.updateVolumeUI();
         break;
     }
@@ -867,9 +891,10 @@ class MusicPlayer {
             <button class="track-like-btn" data-id="${track.id}" title="Sukai">
               <i class="${track.liked ? 'fas' : 'far'} fa-heart"></i>
             </button>
+            ${track.isOnline || track.source === 'youtube' ? '' : `
             <button class="track-dl-btn" data-id="${track.id}" title="Download">
               <i class="fas fa-download"></i>
-            </button>
+            </button>`}
           </div>
         </div>`;
     }).join('');
@@ -905,18 +930,13 @@ class MusicPlayer {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const track = this.tracks.find(t => t.id === btn.dataset.id);
-        if (track) {
-          if (track.isOnline || track.source === 'youtube') {
-            const ot = this.onlineTracks.find(t2 => t2.id === track.id);
-            if (ot) await this.downloadOnlineTrack(ot);
-          } else {
-            const a = document.createElement('a');
-            a.href = track.url;
-            a.download = track.title + '.mp3';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-          }
+        if (track && !track.isOnline && track.source !== 'youtube') {
+          const a = document.createElement('a');
+          a.href = track.url;
+          a.download = track.title + '.mp3';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
         }
       });
     });
@@ -1122,7 +1142,8 @@ class MusicPlayer {
 
     if (track) {
       this.dom.nowPlayingTitle.textContent = track.title;
-      this.dom.nowPlayingArtist.textContent = track.artist + (track.isOnline ? ' · YouTube' : '');
+      const suffix = (track.isOnline ? ' · YouTube' : '') + (this.isLoadingTrack ? ' · memuat…' : '');
+      this.dom.nowPlayingArtist.textContent = track.artist + suffix;
       this.dom.likeBtn.innerHTML = track.liked
         ? '<i class="fas fa-heart"></i>'
         : '<i class="far fa-heart"></i>';
@@ -1154,6 +1175,14 @@ class MusicPlayer {
   // --- Visualizer ---
 
   toggleVisualizer() {
+    if (!this.visualizerActive) {
+      const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+      if (current && current.isOnline) {
+        this.showToast('Visualizer hanya bekerja untuk musik lokal');
+        return;
+      }
+    }
+
     this.visualizerActive = !this.visualizerActive;
     this.dom.visualizerOverlay.classList.toggle('active');
 
@@ -1232,6 +1261,34 @@ class MusicPlayer {
 
   // --- State Persistence ---
 
+  saveRecentOnline(track) {
+    try {
+      let recents = this.getRecentOnline();
+      recents = recents.filter(t => t.id !== track.id);
+      recents.unshift({
+        id: track.id,
+        videoId: track.videoId,
+        title: track.title,
+        artist: track.artist,
+        artwork: track.artwork || null,
+        duration: track.duration || 0,
+        source: 'youtube',
+        isOnline: true,
+      });
+      localStorage.setItem('bluesync_online_recents', JSON.stringify(recents.slice(0, 12)));
+    } catch (e) { /* storage tidak tersedia */ }
+  }
+
+  getRecentOnline() {
+    try {
+      const raw = localStorage.getItem('bluesync_online_recents');
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
   saveState() {
     try {
       const state = {
@@ -1253,7 +1310,7 @@ class MusicPlayer {
         this.volume = state.volume || 0.7;
         this.shuffleOn = state.shuffleOn || false;
         this.repeatMode = state.repeatMode || 'off';
-        this.audio.volume = this.volume;
+        this.player.setVolume(this.volume);
         this.updateVolumeUI();
         if (this.shuffleOn) this.dom.shuffleBtn.classList.add('active');
       }
