@@ -32,6 +32,16 @@ class MusicPlayer {
     this.npLastTrackId = null;
     this._queueRenderKey = null;
 
+    // Lirik (Better Lyrics + LRCLIB)
+    this.lyrics = new LyricsEngine({ relay: (url) => this.youtube.fetchJsonViaRelay(url) });
+    this.nowTab = 'queue';
+    this.lyricsDoc = null;
+    this.lyricsTrackId = null;
+    this.lyricsActiveLine = -1;
+    this.lyricsActiveWord = -1;
+    this.lyricsScrollLockUntil = 0;
+    this.lyricElsByIndex = {};
+
     this.init();
   }
 
@@ -122,6 +132,18 @@ class MusicPlayer {
       queueCount: document.getElementById('queueCount'),
       clearQueueBtn: document.getElementById('clearQueueBtn'),
       trackListTitle: document.getElementById('trackListTitle'),
+
+      // Tab Antrean | Lirik
+      nowPanel: document.getElementById('nowPanel'),
+      nowTabs: document.getElementById('nowTabs'),
+      pageNow: document.getElementById('page-now'),
+      lyricsBtn: document.getElementById('lyricsBtn'),
+      lyricsSource: document.getElementById('lyricsSource'),
+      lyricsScroll: document.getElementById('lyricsScroll'),
+      lyricsState: document.getElementById('lyricsState'),
+      lyricsLines: document.getElementById('lyricsLines'),
+      lyricsFoot: document.getElementById('lyricsFoot'),
+      lyricsRefreshBtn: document.getElementById('lyricsRefreshBtn'),
     };
   }
 
@@ -150,12 +172,36 @@ class MusicPlayer {
 
     this.dom.clearQueueBtn.addEventListener('click', () => this.clearQueue());
 
+    // Tab Antrean | Lirik
+    this.dom.nowTabs.querySelectorAll('.now-tab').forEach((btn) => {
+      btn.addEventListener('click', () => this.switchNowTab(btn.dataset.tab));
+    });
+    this.dom.lyricsBtn.addEventListener('click', () => this.openLyricsPage());
+    this.dom.lyricsRefreshBtn.addEventListener('click', () => {
+      if (!this.currentTrack()) { this.showToast('Belum ada lagu diputar'); return; }
+      this.showToast('Memuat ulang lirik…');
+      this.ensureLyricsForCurrent(true);
+    });
+    this.dom.lyricsLines.addEventListener('click', (e) => {
+      const el = e.target.closest('.lyric-line');
+      if (!el || el.dataset.time == null) return;
+      const t = parseFloat(el.dataset.time);
+      if (isNaN(t)) return;
+      this.player.currentTime = Math.max(0, t - 0.15);
+      this.syncLyricsUI(t, true);
+    });
+    const lockLyricsScroll = () => { this.lyricsScrollLockUntil = Date.now() + 4000; };
+    this.dom.lyricsScroll.addEventListener('wheel', lockLyricsScroll, { passive: true });
+    this.dom.lyricsScroll.addEventListener('touchmove', lockLyricsScroll, { passive: true });
+
     document.addEventListener('keydown', (e) => this.handleKeyboard(e));
 
     this.dom.navItems.forEach(item => {
       item.addEventListener('click', (e) => {
         e.preventDefault();
         this.switchPage(item.dataset.page);
+        // Tombol "Antrean" di sidebar selalu membuka daftar antrean.
+        if (item.dataset.page === 'now') this.switchNowTab('queue');
       });
     });
 
@@ -918,6 +964,7 @@ class MusicPlayer {
 
   openQueuePage() {
     this.switchPage('now');
+    this.switchNowTab('queue');
   }
 
   addToQueue(track) {
@@ -1214,9 +1261,212 @@ class MusicPlayer {
     if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   }
 
+  // --- Lirik (Better Lyrics + LRCLIB) ---
+
+  currentTrack() {
+    return this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+  }
+
+  openLyricsPage() {
+    this.switchPage('now');
+    this.switchNowTab('lyrics');
+  }
+
+  switchNowTab(tab) {
+    this.nowTab = tab === 'lyrics' ? 'lyrics' : 'queue';
+    const panel = this.dom.nowPanel;
+    if (panel) {
+      panel.classList.toggle('tab-lyrics', this.nowTab === 'lyrics');
+      panel.classList.toggle('tab-queue', this.nowTab !== 'lyrics');
+    }
+    this.dom.nowTabs.querySelectorAll('.now-tab').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tab === this.nowTab);
+    });
+    const onNow = this.dom.pageNow && this.dom.pageNow.classList.contains('active');
+    this.dom.lyricsBtn.classList.toggle('active', onNow && this.nowTab === 'lyrics');
+    if (this.nowTab === 'lyrics') this.ensureLyricsForCurrent();
+  }
+
+  lyricsPaneVisible() {
+    return this.nowTab === 'lyrics' && this.dom.pageNow && this.dom.pageNow.classList.contains('active');
+  }
+
+  ensureLyricsForCurrent(force = false) {
+    const track = this.currentTrack();
+    if (!track) {
+      this.lyricsTrackId = null;
+      this.lyricsDoc = null;
+      this.showLyricsState('idle');
+      return;
+    }
+    if (!force && this.lyricsTrackId === track.id && this.lyricsDoc) {
+      this.syncLyricsUI(this.player.currentTime || 0, true);
+      return;
+    }
+
+    const trackId = track.id;
+    this.lyricsTrackId = trackId;
+    this.lyricsDoc = null;
+    this.showLyricsState('loading');
+
+    this.lyrics.load(track, (doc) => {
+      if (this.lyricsTrackId !== trackId) return;
+      this.renderLyricsDoc(doc);
+    }, { force }).then((doc) => {
+      if (this.lyricsTrackId !== trackId) return;
+      const usable = doc && (doc.instrumental || doc.plain || (doc.lines && doc.lines.length));
+      if (!usable) {
+        this.lyricsDoc = null;
+        this.showLyricsState('empty');
+      } else if (!this.lyricsDoc) {
+        this.renderLyricsDoc(doc);
+      }
+    });
+  }
+
+  renderLyricsDoc(doc) {
+    if (!doc) return;
+    this.lyricsDoc = doc;
+    this.lyricsActiveLine = -1;
+    this.lyricsActiveWord = -1;
+    this.lyricElsByIndex = {};
+
+    const provider = doc.provider === 'better' ? 'Better Lyrics' : 'LRCLIB';
+    let syncLabel = 'tanpa penanda waktu';
+    if (doc.instrumental) syncLabel = 'instrumental';
+    else if (doc.sync === 'word') syncLabel = 'karaoke per kata';
+    else if (doc.sync === 'line') syncLabel = 'tersinkron';
+    const syncOk = doc.sync !== 'none' && !doc.instrumental;
+
+    this.dom.lyricsSource.innerHTML =
+      `<span class="lyrics-badge"><i class="fas ${doc.provider === 'better' ? 'fa-bolt' : 'fa-database'}"></i> ${provider}</span>` +
+      `<span class="lyrics-sync${syncOk ? ' ok' : ''}">${syncLabel}</span>`;
+
+    if (doc.instrumental) {
+      this.showLyricsState('instrumental');
+      return;
+    }
+
+    const lines = Array.isArray(doc.lines) ? doc.lines : [];
+
+    if (!lines.length && doc.plain) {
+      this.dom.lyricsLines.innerHTML = String(doc.plain)
+        .split(/\r?\n/)
+        .map((l) => (l.trim()
+          ? `<div class="lyric-line plain">${this.escapeHtml(l)}</div>`
+          : '<div class="lyric-gap"></div>'))
+        .join('');
+      this.dom.lyricsState.style.display = 'none';
+      this.setLyricsFoot(`Lirik ${provider} (tanpa penanda waktu).`);
+      this.dom.lyricsScroll.scrollTop = 0;
+      return;
+    }
+
+    if (!lines.length) {
+      this.showLyricsState('empty');
+      return;
+    }
+
+    this.dom.lyricsLines.innerHTML = lines.map((ln, i) => {
+      if (ln.t == null) return `<div class="lyric-line plain">${this.escapeHtml(ln.text)}</div>`;
+      const inner = (doc.sync === 'word' && ln.words)
+        ? ln.words.map((w) => `<span class="lw">${this.escapeHtml(w.text)}</span>`).join('')
+        : this.escapeHtml(ln.text);
+      return `<div class="lyric-line" data-line="${i}" data-time="${ln.t}">${inner}</div>`;
+    }).join('');
+
+    this.dom.lyricsState.style.display = 'none';
+    this.dom.lyricsLines.querySelectorAll('.lyric-line[data-line]').forEach((el) => {
+      this.lyricElsByIndex[parseInt(el.dataset.line, 10)] = el;
+    });
+    this.setLyricsFoot(`Lirik ${provider} · klik baris untuk melompat`);
+    this.dom.lyricsScroll.scrollTop = 0;
+    this.syncLyricsUI(this.player.currentTime || 0, true);
+  }
+
+  showLyricsState(kind) {
+    const states = {
+      idle: '<i class="fas fa-align-left"></i><p>Pilih lagu untuk melihat lirik</p><p class="sub">Lirik tersinkron dari Better Lyrics &amp; LRCLIB</p>',
+      loading: '<div class="lyrics-loading"><i class="fas fa-circle-notch fa-spin"></i></div><p>Mencari lirik…</p><p class="sub">Better Lyrics (utama) · LRCLIB (cadangan)</p>',
+      empty: '<i class="fas fa-microphone"></i><p>Lirik tidak tersedia untuk lagu ini</p><p class="sub">Coba tombol muat ulang atau pilih lagu lain.</p>',
+      instrumental: '<i class="fas fa-music"></i><p>Lagu instrumental — tanpa lirik</p>',
+    };
+    this.dom.lyricsState.innerHTML = states[kind] || states.idle;
+    this.dom.lyricsState.style.display = '';
+    this.dom.lyricsLines.innerHTML = '';
+    this.setLyricsFoot('');
+    this.lyricElsByIndex = {};
+    this.lyricsActiveLine = -1;
+    this.lyricsActiveWord = -1;
+    if (kind === 'idle' || kind === 'loading' || kind === 'empty') this.dom.lyricsSource.innerHTML = '';
+  }
+
+  setLyricsFoot(text) {
+    this.dom.lyricsFoot.textContent = text || '';
+  }
+
+  /** Sorot baris / kata yang sedang dinyanyikan. Dipanggil dari onTimeUpdate. */
+  syncLyricsUI(t, force = false) {
+    const doc = this.lyricsDoc;
+    if (!doc || doc.instrumental || doc.sync === 'none' || !doc.lines || !doc.lines.length) return;
+    if (!this.lyricsPaneVisible()) return;
+
+    const lines = doc.lines;
+
+    // Baris aktif = baris terakhir yang mulai sebelum t.
+    let lo = 0;
+    let hi = lines.length - 1;
+    let idx = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (lines[mid].t <= t + 0.12) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    if (idx !== this.lyricsActiveLine || force) {
+      const prev = this.lyricElsByIndex[this.lyricsActiveLine];
+      if (prev) {
+        prev.classList.remove('active');
+        prev.querySelectorAll('.lw-on').forEach((sp) => sp.classList.remove('lw-on'));
+      }
+      const el = idx >= 0 ? this.lyricElsByIndex[idx] : null;
+      if (el) {
+        el.classList.add('active');
+        if (Date.now() > this.lyricsScrollLockUntil) {
+          el.scrollIntoView({ block: 'center', behavior: force ? 'auto' : 'smooth' });
+        }
+      }
+      this.lyricsActiveLine = idx;
+      this.lyricsActiveWord = -1;
+    }
+
+    // Sorotan per kata (mode karaoke Better Lyrics).
+    if (doc.sync === 'word' && idx >= 0) {
+      const line = lines[idx];
+      const el = this.lyricElsByIndex[idx];
+      if (line && line.words && el) {
+        let wi = -1;
+        for (let j = 0; j < line.words.length; j++) {
+          const wt = line.words[j].t;
+          if (wt == null || wt <= t + 0.2) wi = j;
+          else break;
+        }
+        if (wi !== this.lyricsActiveWord || force) {
+          el.querySelectorAll('.lw').forEach((sp, j) => sp.classList.toggle('lw-on', j <= wi));
+          this.lyricsActiveWord = wi;
+        }
+      }
+    }
+  }
+
   // --- Audio Events ---
 
   onTimeUpdate() {
+    this.syncLyricsUI(this.player.currentTime || 0);
     const duration = this.player.duration;
     if (!duration) return;
     const ratio = this.player.currentTime / duration;
@@ -1382,9 +1632,11 @@ class MusicPlayer {
       this.renderNowPlaying();
       this.renderQueue();
       this.startNpVisualizer();
+      if (this.nowTab === 'lyrics') this.ensureLyricsForCurrent();
     } else {
       this.stopNpVisualizer();
     }
+    this.dom.lyricsBtn.classList.toggle('active', page === 'now' && this.nowTab === 'lyrics');
   }
 
   switchPlaylist(id, element) {
@@ -2032,6 +2284,7 @@ class MusicPlayer {
     // Halaman Antrean / Sekarang Diputar.
     this.renderNowPlaying();
     this.renderQueue();
+    if (this.lyricsPaneVisible()) this.ensureLyricsForCurrent();
   }
 
   updateVolumeUI() {

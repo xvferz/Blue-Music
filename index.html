@@ -208,9 +208,12 @@
             </div>
           </section>
 
-          <section class="queue-panel">
+          <section class="queue-panel tab-queue" id="nowPanel">
             <div class="queue-header">
-              <h3><i class="fas fa-list-ul"></i> Antrean</h3>
+              <div class="now-tabs" id="nowTabs">
+                <button class="now-tab active" data-tab="queue"><i class="fas fa-list-ul"></i> Antrean</button>
+                <button class="now-tab" data-tab="lyrics"><i class="fas fa-align-left"></i> Lirik</button>
+              </div>
               <div class="queue-header-actions">
                 <span class="queue-count" id="queueCount">0 lagu</span>
                 <button class="queue-clear-btn" id="clearQueueBtn" title="Bersihkan antrean">
@@ -220,6 +223,20 @@
             </div>
             <div class="queue-now" id="queueNow"></div>
             <div class="queue-list" id="queueList"></div>
+
+            <div class="lyrics-pane" id="lyricsPane">
+              <div class="lyrics-toolbar">
+                <div class="lyrics-source" id="lyricsSource"></div>
+                <button class="lyrics-refresh-btn" id="lyricsRefreshBtn" title="Muat ulang lirik">
+                  <i class="fas fa-sync-alt"></i>
+                </button>
+              </div>
+              <div class="lyrics-scroll" id="lyricsScroll">
+                <div class="lyrics-state" id="lyricsState"></div>
+                <div class="lyrics-lines" id="lyricsLines"></div>
+              </div>
+              <div class="lyrics-foot" id="lyricsFoot"></div>
+            </div>
           </section>
         </div>
       </div>
@@ -269,6 +286,9 @@
       </div>
 
       <div class="player-right">
+        <button class="control-btn" id="lyricsBtn" title="Lirik">
+          <i class="fas fa-align-left"></i>
+        </button>
         <button class="control-btn" id="downloadBtn" title="Download">
           <i class="fas fa-download"></i>
         </button>
@@ -322,6 +342,7 @@
   <script src="https://www.youtube.com/iframe_api"></script>
   <script src="js/youtube.js"></script>
   <script src="js/player-engine.js"></script>
+  <script src="js/lyrics.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -1756,4 +1756,225 @@ html, body {
   .album-visual {
     min-height: 0;
   }
+
+  .lyrics-scroll {
+    max-height: 60vh;
+  }
+}
+
+/* ============================================================
+   Panel Lirik (tab Antrean | Lirik) — Better Lyrics + LRCLIB
+   ============================================================ */
+.now-tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 4px;
+  border-radius: 10px;
+}
+
+.now-tab {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: var(--transition);
+}
+
+.now-tab:hover {
+  color: var(--text-secondary);
+}
+
+.now-tab.active {
+  background: rgba(59, 130, 246, 0.16);
+  color: #fff;
+}
+
+.now-tab.active i {
+  color: var(--accent-primary);
+}
+
+.queue-panel.tab-lyrics .queue-now,
+.queue-panel.tab-lyrics .queue-list,
+.queue-panel.tab-lyrics .queue-header-actions {
+  display: none;
+}
+
+.lyrics-pane {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.queue-panel.tab-lyrics .lyrics-pane {
+  display: flex;
+}
+
+.lyrics-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px 10px;
+  min-height: 22px;
+}
+
+.lyrics-source {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 11px;
+  min-height: 22px;
+}
+
+.lyrics-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 600;
+}
+
+.lyrics-sync {
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+
+.lyrics-sync.ok {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.lyrics-refresh-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: var(--transition);
+}
+
+.lyrics-refresh-btn:hover {
+  color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.lyrics-scroll {
+  position: relative;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 4px 6px 42px;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 22px, #000 calc(100% - 34px), transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0, #000 22px, #000 calc(100% - 34px), transparent 100%);
+}
+
+.lyrics-state {
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 30px 14px;
+}
+
+.lyrics-state i {
+  font-size: 30px;
+  color: rgba(96, 165, 250, 0.6);
+}
+
+.lyrics-state p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.lyrics-state .sub {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.lyrics-loading i {
+  font-size: 26px;
+  color: var(--accent-primary);
+}
+
+.lyric-line {
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  padding: 5px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.25s ease, background 0.25s ease;
+}
+
+.lyric-line:hover {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.lyric-line.active {
+  color: #fff;
+  font-weight: 600;
+  background: rgba(59, 130, 246, 0.15);
+  box-shadow: inset 3px 0 0 var(--accent-primary);
+}
+
+.lyric-line.plain {
+  cursor: default;
+}
+
+.lyric-gap {
+  height: 14px;
+}
+
+.lyric-line .lw {
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.lyric-line.active .lw {
+  color: #fff;
+  opacity: 0.55;
+}
+
+.lyric-line.active .lw.lw-on {
+  color: #93c5fd;
+  opacity: 1;
+  text-shadow: 0 0 12px rgba(59, 130, 246, 0.5);
+}
+
+.lyrics-foot {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 8px 6px 2px;
+  opacity: 0.8;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  min-height: 30px;
+}
+
+#lyricsBtn.active {
+  color: var(--accent-primary);
 }
