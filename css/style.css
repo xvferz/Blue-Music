@@ -1978,3 +1978,84 @@ html, body {
 #lyricsBtn.active {
   color: var(--accent-primary);
 }
+
+/* Toolbar aksi lirik: offset + muat ulang */
+.lyrics-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lyrics-offset {
+  display: none; /* tampil via JS saat lirik tersinkron */
+  align-items: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 20px;
+  padding: 2px;
+}
+
+.lyr-off-btn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.lyr-off-btn:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-primary);
+}
+
+.lyr-off-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.lyr-off-val {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+  height: 22px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 12px;
+  transition: var(--transition);
+}
+
+.lyr-off-val:hover {
+  color: var(--accent-primary);
+}
+
+.lyr-off-val.set {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+/* Mini visualizer di player bar */
+.mini-viz {
+  width: 76px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.12);
+}
+
+@media (max-width: 1150px) {
+  .mini-viz {
+    display: none;
+  }
+}

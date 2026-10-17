@@ -4,10 +4,12 @@
  * Sumber utama : Better Lyrics API (TTML dengan penanda waktu per kata).
  *   API ini tidak mengirim header CORS dan hanya melayani lagu yang sudah
  *   ada di cache publiknya tanpa API key, jadi permintaan dilewatkan relay
- *   teks yang sudah dipakai BlueSync (r.jina.ai dkk.). Bila berhasil,
- *   tampilan lirik "diupgrade" ke mode karaoke per kata di latar belakang.
- * Sumber cadangan: LRCLIB (lrclib.net) — CORS terbuka, tanpa API key,
- *   menyediakan LRC tersinkron.
+ *   teks yang sudah dipakai BlueSync (r.jina.ai dkk.). Sebelum memanggil,
+ *   metadata kanonik (album + durasi) diambil dari iTunes — kunci cache
+ *   API-nya menyertakan keduanya, jadi ini menaikkan peluang hit.
+ * Sumber kedua  : LRC.RED — basis data lirik yang dipakai Better Lyrics
+ *   sendiri (CORS terbuka). TTML/LRC-nya diunduh per ISRC.
+ * Sumber ketiga : LRCLIB (lrclib.net) — CORS terbuka, tanpa API key.
  *
  * Hasil terbaik disimpan di localStorage supaya lagu yang sama tidak
  * diambil berulang kali.
@@ -60,6 +62,7 @@ class LyricsEngine {
 
     await Promise.allSettled([
       this.fromBetterLyrics(meta).then(deliver).catch(() => {}),
+      this.fromLrcRed(meta).then(deliver).catch(() => {}),
       this.fromLrclib(meta).then(deliver).catch(() => {}),
     ]);
 
@@ -70,12 +73,17 @@ class LyricsEngine {
     return null;
   }
 
-  /** Semakin tinggi semakin baik: karaoke per kata > tersinkron > biasa. */
+  /**
+   * Prioritas: Better Lyrics (API resmi) > LRC.RED (basis data yang dipakai
+   * Better Lyrics sendiri) > LRCLIB. Di dalam satu sumber: karaoke per kata
+   * > tersinkron per baris > tanpa penanda waktu.
+   */
   rank(doc) {
     if (!doc) return -1;
-    if (doc.instrumental) return 5;
-    const base = doc.sync === 'word' ? 3 : doc.sync === 'line' ? 2 : 1;
-    return base * 10 + (doc.provider === 'better' ? 1 : 0);
+    if (doc.instrumental) return 6;
+    const sync = doc.sync === 'word' ? 3 : doc.sync === 'line' ? 2 : 1;
+    const prov = doc.provider === 'better' ? 40 : doc.provider === 'lrcred' ? 30 : 20;
+    return prov + sync;
   }
 
   /* ================= Metadata & pembersihan judul ================= */
@@ -136,48 +144,130 @@ class LyricsEngine {
 
   /* ================= Sumber 1: Better Lyrics ================= */
 
+  /**
+   * Better Lyrics: makin lengkap metadatanya (s + a + al + d), makin besar
+   * peluang cache hit — kunci cache-nya menyertakan album & durasi.
+   * Karena itu metadata kanonik diambil dulu dari iTunes (gratis, CORS
+   * terbuka), lalu API dipanggil lewat relay teks.
+   */
   async fromBetterLyrics(meta) {
     if (!this.relay) return null;
+
+    const catalog = await this.itunesLookup(meta).catch(() => null);
+
+    // Variasi dari yang paling spesifik ke paling umum.
+    const variants = [];
+    if (catalog && catalog.title) {
+      variants.push({
+        s: catalog.title,
+        a: catalog.artist || meta.artist,
+        al: catalog.album || '',
+        d: catalog.duration || 0,
+        videoId: meta.videoId,
+      });
+    }
+    variants.push({ s: meta.title, a: meta.artist, al: '', d: meta.duration || 0, videoId: meta.videoId });
+    variants.push({ s: meta.title, a: meta.artist, al: '', d: 0, videoId: meta.videoId });
+
+    // Buang duplikat.
+    const seen = new Set();
+    const unique = variants.filter((v) => {
+      const key = `${v.s}|${v.a}|${v.al}|${v.d ? Math.round(v.d) : 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
     const hosts = ['https://api.betterlyrics.org', 'https://lyrics-api.boidu.dev'];
     for (const host of hosts) {
-      const result = await this.tryBetterHost(host, meta);
-      if (result !== undefined) return result; // null = backend menjawab (cache miss)
+      let backendAnswered = false;
+      for (const v of unique) {
+        const params = new URLSearchParams();
+        if (v.s) params.set('s', v.s);
+        if (v.a) params.set('a', v.a);
+        if (v.al) params.set('al', v.al);
+        if (v.d > 0) params.set('d', String(Math.round(v.d)));
+        if (v.videoId) params.set('videoId', v.videoId);
+
+        const json = await this.relayWithTimeout(`${host}/getLyrics?${params.toString()}`, 14000);
+        if (!json) continue; // relay gagal — coba variasi berikutnya
+        // Amplop galat relay (mis. rate limit jina) bukan jawaban backend.
+        const answered = json.ttml !== undefined || json.error !== undefined;
+        if (!answered) continue;
+        backendAnswered = true;
+
+        if (json.ttml) {
+          const parsed = this.parseTtml(json.ttml);
+          if (parsed && parsed.lines.length) {
+            return {
+              provider: 'better',
+              sync: parsed.sync,
+              lines: parsed.lines,
+              title: v.s || meta.title,
+              artist: v.a || meta.artist,
+              ts: Date.now(),
+            };
+          }
+        }
+        // json.error (401 cache miss / 404) — variasi lain masih bisa HIT.
+      }
+      if (backendAnswered) return null; // host ini jalan; host lain backend-nya sama
     }
     return null;
   }
 
-  /** @returns {Promise<object|null|undefined>} undefined = relay gagal total. */
-  async tryBetterHost(host, meta) {
-    const base = new URLSearchParams();
-    base.set('s', meta.title);
-    if (meta.artist) base.set('a', meta.artist);
+  /** Cari metadata kanonik (judul, artis, album, durasi) di iTunes. */
+  async itunesLookup(meta) {
+    const term = `${meta.artist} ${meta.title}`.trim();
+    if (!term) return null;
 
-    const variants = [];
-    const full = new URLSearchParams(base);
-    if (meta.duration > 0) full.set('d', String(meta.duration));
-    if (meta.videoId) full.set('videoId', meta.videoId);
-    variants.push(full);
-    if (meta.duration > 0) variants.push(new URLSearchParams(base)); // tanpa durasi
+    const j = await this.fetchJson(
+      `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=8`,
+      8000
+    );
+    if (!j || !Array.isArray(j.results) || !j.results.length) return null;
 
-    for (const params of variants) {
-      const json = await this.relayWithTimeout(`${host}/getLyrics?${params.toString()}`);
-      if (!json) continue; // relay gagal — coba variasi berikutnya
-      if (json.ttml) {
-        const parsed = this.parseTtml(json.ttml);
-        if (parsed && parsed.lines.length) {
-          return {
-            provider: 'better',
-            sync: parsed.sync,
-            lines: parsed.lines,
-            title: meta.title,
-            artist: meta.artist,
-            ts: Date.now(),
-          };
+    const title = String(meta.title || '').toLowerCase();
+    const artist = String(meta.artist || '').toLowerCase();
+    let best = null;
+    let bestScore = -1;
+
+    for (const it of j.results) {
+      if (!it || !it.trackName) continue;
+      let score = 0;
+      const t = String(it.trackName).toLowerCase();
+      const a = String(it.artistName || '').toLowerCase();
+
+      if (t === title) score += 4;
+      else if (t.includes(title) || title.includes(t)) score += 2;
+
+      if (artist) {
+        if (a.includes(artist) || artist.includes(a)) score += 4;
+        else {
+          const words = artist.split(/\s+/).filter((w) => w.length > 2);
+          if (words.some((w) => a.includes(w))) score += 1;
         }
       }
-      if (json.error) return null; // 401/404 — tidak akan beda untuk variasi lain
+
+      if (meta.duration > 0 && it.trackTimeMillis) {
+        const diff = Math.abs(it.trackTimeMillis / 1000 - meta.duration);
+        if (diff <= 8) score += 3;
+        else if (diff <= 20) score += 1;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = it;
+      }
     }
-    return undefined;
+
+    if (!best || bestScore < 5) return null;
+    return {
+      title: best.trackName,
+      artist: best.artistName || meta.artist,
+      album: best.collectionName || '',
+      duration: best.trackTimeMillis ? Math.round(best.trackTimeMillis / 1000) : 0,
+    };
   }
 
   relayWithTimeout(url, timeoutMs = 18000) {
@@ -188,33 +278,123 @@ class LyricsEngine {
     ]);
   }
 
-  /* ================= Sumber 2: LRCLIB ================= */
+  /* ================= Sumber 2: LRC.RED (basis data Better Lyrics) ====== */
+
+  /**
+   * LRC.RED adalah basis data lirik yang dipakai Better Lyrics sendiri
+   * (29+ juta lagu, sebagian berpenanda waktu per kata). Pencarian lewat
+   * /search.json, lalu berkas liriknya diunduh dari /s/<isrc>.ttml.
+   */
+  async fromLrcRed(meta) {
+    const queries = [];
+    const full = `${meta.artist} ${meta.title}`.trim();
+    if (full) queries.push(full);
+    if (meta.title && meta.title !== full) queries.push(meta.title);
+
+    for (const q of queries) {
+      const j = await this.fetchJson(`https://lrc.red/search.json?q=${encodeURIComponent(q)}`, 6500);
+      const hits = j && Array.isArray(j.hits) ? j.hits.filter((h) => h && h.isrc) : [];
+      if (!hits.length) continue;
+
+      const hit = this.pickLrcRedHit(hits, meta);
+      if (!hit) continue;
+
+      const id = hit.isrc;
+      const ttml = await this.fetchText(`https://lrc.red/s/${id}.ttml`, 6500);
+      if (ttml) {
+        const parsed = this.parseTtml(ttml);
+        if (parsed && parsed.lines.length) {
+          return {
+            provider: 'lrcred',
+            sync: parsed.sync,
+            lines: parsed.lines,
+            title: meta.title,
+            artist: meta.artist,
+            ts: Date.now(),
+          };
+        }
+      }
+
+      const lrc = await this.fetchText(`https://lrc.red/s/${id}.lrc`, 6500);
+      if (lrc) {
+        const lines = this.parseLrc(lrc);
+        if (lines) {
+          return {
+            provider: 'lrcred',
+            sync: 'line',
+            lines,
+            title: meta.title,
+            artist: meta.artist,
+            ts: Date.now(),
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  pickLrcRedHit(hits, meta) {
+    const title = String(meta.title || '').toLowerCase();
+    const artist = String(meta.artist || '').toLowerCase();
+    let best = null;
+    let bestScore = -1;
+
+    for (const h of hits) {
+      let score = 0;
+      const ht = String(h.title || h.name || h.trackName || '').toLowerCase();
+      const ha = String(h.artist || h.artistName || (Array.isArray(h.artists) ? h.artists.join(' ') : '') || '').toLowerCase();
+
+      if (ht && title) {
+        if (ht === title) score += 4;
+        else if (ht.includes(title) || title.includes(ht)) score += 2;
+      } else {
+        score += 1; // bidang tidak tersedia — netral
+      }
+      if (ha && artist) {
+        if (ha.includes(artist) || artist.includes(ha)) score += 4;
+      } else {
+        score += 1;
+      }
+      if (typeof h.duration === 'number' && meta.duration > 0) {
+        const diff = Math.abs(h.duration - meta.duration);
+        if (diff <= 6) score += 3;
+        else if (diff <= 15) score += 1;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = h;
+      }
+    }
+    return best;
+  }
+
+  /* ================= Sumber 3: LRCLIB ================= */
 
   async fromLrclib(meta) {
     const api = 'https://lrclib.net/api';
+    const tries = [];
 
-    // 1) Pencocokan persis (durasi membuat pencocokan lebih ketat).
     if (meta.artist) {
-      const exact = new URLSearchParams();
-      exact.set('artist_name', meta.artist);
-      exact.set('track_name', meta.title);
-      if (meta.duration > 0) exact.set('duration', String(meta.duration));
-      const doc = await this.tryLrclibGet(`${api}/get?${exact.toString()}`, meta);
-      if (doc) return doc;
+      const p1 = new URLSearchParams({ artist_name: meta.artist, track_name: meta.title });
+      if (meta.duration > 0) p1.set('duration', String(meta.duration));
+      tries.push({ url: `${api}/get?${p1.toString()}`, kind: 'get' });
+
+      const p2 = new URLSearchParams({ artist_name: meta.artist, track_name: meta.title });
+      tries.push({ url: `${api}/get?${p2.toString()}`, kind: 'get' });
+
+      const p3 = new URLSearchParams({ artist_name: meta.artist, track_name: meta.title });
+      tries.push({ url: `${api}/search?${p3.toString()}`, kind: 'search' });
     }
 
-    // 2) Pencarian artist + judul.
-    const s1 = new URLSearchParams();
-    if (meta.artist) s1.set('artist_name', meta.artist);
-    s1.set('track_name', meta.title);
-    const found1 = await this.lrclibSearch(`${api}/search?${s1.toString()}`, meta);
-    if (found1) return found1;
+    tries.push({ url: `${api}/search?${new URLSearchParams({ q: `${meta.artist} ${meta.title}`.trim() }).toString()}`, kind: 'search' });
 
-    // 3) Judul asli (masih ada embel-embel) via q=.
     if (meta.rawTitle && meta.rawTitle.toLowerCase() !== meta.title.toLowerCase()) {
-      const s2 = new URLSearchParams({ q: meta.rawTitle });
-      const found2 = await this.lrclibSearch(`${api}/search?${s2.toString()}`, meta);
-      if (found2) return found2;
+      tries.push({ url: `${api}/search?${new URLSearchParams({ q: meta.rawTitle }).toString()}`, kind: 'search' });
+    }
+
+    for (const t of tries) {
+      const doc = t.kind === 'get' ? await this.tryLrclibGet(t.url, meta) : await this.lrclibSearch(t.url, meta);
+      if (doc) return doc;
     }
     return null;
   }
@@ -299,6 +479,55 @@ class LyricsEngine {
       return null;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /** Unduh teks (TTML/LRC) dari lrc.red; tolak halaman HTML galat. */
+  async fetchText(url, timeoutMs = 8000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      const text = await res.text();
+      if (!text || /^\s*<(!doctype|html)/i.test(text)) return null;
+      return text;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /* ================= Offset sinkronisasi per lagu ================= */
+
+  offsetKey(track) {
+    const meta = this.buildMeta(track);
+    return meta ? meta.key : null;
+  }
+
+  getOffset(key) {
+    if (!key) return 0;
+    try {
+      const map = JSON.parse(localStorage.getItem('bluesync_lyrics_offsets') || '{}');
+      return Number(map[key]) || 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  setOffset(key, value) {
+    if (!key) return;
+    const v = Math.max(-10, Math.min(10, Math.round(value * 10) / 10));
+    try {
+      const map = JSON.parse(localStorage.getItem('bluesync_lyrics_offsets') || '{}');
+      if (v === 0) delete map[key];
+      else map[key] = v;
+      const keys = Object.keys(map);
+      if (keys.length > 60) for (const k of keys.slice(0, keys.length - 60)) delete map[k];
+      localStorage.setItem('bluesync_lyrics_offsets', JSON.stringify(map));
+    } catch (e) {
+      /* penyimpanan penuh — abaikan */
     }
   }
 

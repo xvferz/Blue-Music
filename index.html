@@ -227,9 +227,16 @@
             <div class="lyrics-pane" id="lyricsPane">
               <div class="lyrics-toolbar">
                 <div class="lyrics-source" id="lyricsSource"></div>
-                <button class="lyrics-refresh-btn" id="lyricsRefreshBtn" title="Muat ulang lirik">
-                  <i class="fas fa-sync-alt"></i>
-                </button>
+                <div class="lyrics-toolbar-actions">
+                  <div class="lyrics-offset" id="lyricsOffset" style="display:none">
+                    <button class="lyr-off-btn" id="lyrOffMinus" title="Lirik lebih awal 0,5 detik">−</button>
+                    <button class="lyr-off-val" id="lyrOffVal" title="Klik untuk reset offset">0.0 dtk</button>
+                    <button class="lyr-off-btn" id="lyrOffPlus" title="Lirik lebih lambat 0,5 detik">+</button>
+                  </div>
+                  <button class="lyrics-refresh-btn" id="lyricsRefreshBtn" title="Muat ulang lirik">
+                    <i class="fas fa-sync-alt"></i>
+                  </button>
+                </div>
               </div>
               <div class="lyrics-scroll" id="lyricsScroll">
                 <div class="lyrics-state" id="lyricsState"></div>
@@ -255,6 +262,7 @@
         <button class="btn-like" id="likeBtn" title="Sukai">
           <i class="far fa-heart"></i>
         </button>
+        <canvas class="mini-viz" id="miniViz" title="Visualizer"></canvas>
       </div>
 
       <div class="player-center">

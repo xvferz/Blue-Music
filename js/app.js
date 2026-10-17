@@ -17,6 +17,7 @@ class MusicPlayer {
     this.audioCtx = null;
     this.visualizerActive = false;
     this.animFrameId = null;
+    this.miniAnimId = null;
     this.youtube = new YouTubeMusicAPI();
     this.activePlaylist = 'all';
     this.searchDebounceId = null;
@@ -32,11 +33,13 @@ class MusicPlayer {
     this.npLastTrackId = null;
     this._queueRenderKey = null;
 
-    // Lirik (Better Lyrics + LRCLIB)
+    // Lirik (Better Lyrics + LRC.RED + LRCLIB)
     this.lyrics = new LyricsEngine({ relay: (url) => this.youtube.fetchJsonViaRelay(url) });
     this.nowTab = 'queue';
     this.lyricsDoc = null;
     this.lyricsTrackId = null;
+    this.lyricsMetaKey = null;
+    this.lyricsOffset = 0;
     this.lyricsActiveLine = -1;
     this.lyricsActiveWord = -1;
     this.lyricsScrollLockUntil = 0;
@@ -54,6 +57,7 @@ class MusicPlayer {
     this.setupAudioContext();
     this.render();
     this.updatePlayerUI();
+    this.startMiniVisualizer();
     this.initExplore();
   }
 
@@ -144,6 +148,13 @@ class MusicPlayer {
       lyricsLines: document.getElementById('lyricsLines'),
       lyricsFoot: document.getElementById('lyricsFoot'),
       lyricsRefreshBtn: document.getElementById('lyricsRefreshBtn'),
+      lyricsOffset: document.getElementById('lyricsOffset'),
+      lyrOffMinus: document.getElementById('lyrOffMinus'),
+      lyrOffVal: document.getElementById('lyrOffVal'),
+      lyrOffPlus: document.getElementById('lyrOffPlus'),
+
+      // Mini visualizer di player bar
+      miniViz: document.getElementById('miniViz'),
     };
   }
 
@@ -182,10 +193,13 @@ class MusicPlayer {
       this.showToast('Memuat ulang lirik…');
       this.ensureLyricsForCurrent(true);
     });
+    this.dom.lyrOffMinus.addEventListener('click', () => this.nudgeLyricsOffset(-0.5));
+    this.dom.lyrOffPlus.addEventListener('click', () => this.nudgeLyricsOffset(0.5));
+    this.dom.lyrOffVal.addEventListener('click', () => this.nudgeLyricsOffset(0, true));
     this.dom.lyricsLines.addEventListener('click', (e) => {
       const el = e.target.closest('.lyric-line');
       if (!el || el.dataset.time == null) return;
-      const t = parseFloat(el.dataset.time);
+      const t = parseFloat(el.dataset.time) + (this.lyricsOffset || 0);
       if (isNaN(t)) return;
       this.player.currentTime = Math.max(0, t - 0.15);
       this.syncLyricsUI(t, true);
@@ -1188,65 +1202,96 @@ class MusicPlayer {
 
   // --- Visualizer album (canvas halaman antrean) ---
 
-  startNpVisualizer() {
-    if (this.npAnimId) return;
-    const canvas = this.dom.npCanvas;
+  /**
+   * Gambar satu bingkai bar visualizer ke sebuah canvas.
+   * Musik lokal → data analyser sungguhan. Pemutaran online (embed)
+   * tidak memberi akses audio, jadi dipakai pola sintetis lembut supaya
+   * visualizer tetap hidup.
+   */
+  drawBarsFrame(canvas, opts = {}) {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    const dataArray = this.analyser ? new Uint8Array(this.analyser.frequencyBinCount) : null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width && (canvas.width !== Math.floor(rect.width) || canvas.height !== Math.floor(rect.height))) {
+      canvas.width = Math.floor(rect.width);
+      canvas.height = Math.floor(rect.height);
+    }
+    const w = canvas.width;
+    const h = canvas.height;
+    if (!w || !h) return;
+
+    const trail = opts.trail || 0;
+    if (trail > 0) {
+      ctx.fillStyle = `${opts.trailColor || 'rgba(6, 10, 24,'} ${trail})`;
+      ctx.fillRect(0, 0, w, h);
+    } else {
+      ctx.clearRect(0, 0, w, h);
+    }
+
+    const bars = Math.max(4, opts.bars || 48);
+    const gap = opts.gap != null ? opts.gap : 3;
+    const barW = Math.max(1, (w - gap * (bars - 1)) / bars);
+    const radius = Math.min(barW / 2, opts.radius != null ? opts.radius : 3);
+    const scale = opts.heightScale || 0.92;
+    const minH = opts.minHeight != null ? opts.minHeight : 3;
+    const active = opts.active != null ? opts.active : 1;
+    const speed = opts.speed || 1;
+    const colors = opts.colors || ['rgba(30, 64, 175, 0.75)', 'rgba(59, 130, 246, 0.75)', 'rgba(147, 197, 253, 0.85)'];
+
+    let data = null;
+    if (this.analyser && this.player.mode === 'local' && this.audioCtx && this.audioCtx.state === 'running') {
+      if (!this._vizData || this._vizData.length !== this.analyser.frequencyBinCount) {
+        this._vizData = new Uint8Array(this.analyser.frequencyBinCount);
+      }
+      this.analyser.getByteFrequencyData(this._vizData);
+      data = this._vizData;
+    }
+
+    const t = (performance.now() / 1000) * speed;
+    for (let i = 0; i < bars; i++) {
+      let v;
+      if (data) {
+        v = data[Math.floor((i / bars) * data.length)] / 255;
+      } else {
+        const n = Math.sin(t * 1.7 + i * 0.55) * 0.5 + Math.sin(t * 0.9 + i * 1.31) * 0.5;
+        v = Math.max(0.06, (0.45 + n * 0.28) * active);
+      }
+
+      const bh = Math.max(minH, v * h * scale);
+      const x = i * (barW + gap);
+      const y = h - bh;
+      const grad = ctx.createLinearGradient(0, h, 0, y);
+      grad.addColorStop(0, colors[0]);
+      grad.addColorStop(0.6, colors[1]);
+      grad.addColorStop(1, colors[2]);
+      ctx.fillStyle = grad;
+
+      if (opts.rounded === false || radius < 1) {
+        ctx.fillRect(x, y, barW, bh);
+        continue;
+      }
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.arcTo(x + barW, y, x + barW, y + bh, radius);
+      ctx.arcTo(x + barW, y + bh, x, y + bh, radius);
+      ctx.arcTo(x, y + bh, x, y, radius);
+      ctx.arcTo(x, y, x + barW, y, radius);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  startNpVisualizer() {
+    if (this.npAnimId) return;
+    if (!this.dom.npCanvas) return;
 
     const draw = () => {
       this.npAnimId = requestAnimationFrame(draw);
-
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width && (canvas.width !== Math.floor(rect.width) || canvas.height !== Math.floor(rect.height))) {
-        canvas.width = rect.width;
-        canvas.height = rect.height;
-      }
-      const w = canvas.width;
-      const h = canvas.height;
-      if (!w || !h) return;
-
-      ctx.clearRect(0, 0, w, h);
-
-      const useReal = this.analyser && this.player.mode === 'local' && this.audioCtx && this.audioCtx.state === 'running';
-      if (useReal) this.analyser.getByteFrequencyData(dataArray);
-
-      const bars = 48;
-      const gap = 3;
-      const barW = (w - gap * (bars - 1)) / bars;
-      const t = performance.now() / 1000;
-      const active = this.isPlaying ? 1 : 0.22;
-
-      for (let i = 0; i < bars; i++) {
-        let v;
-        if (useReal && dataArray) {
-          v = dataArray[Math.floor((i / bars) * dataArray.length)] / 255;
-        } else {
-          // Pola sintetis lembut untuk pemutaran online (embed).
-          const n = Math.sin(t * 1.7 + i * 0.55) * 0.5 + Math.sin(t * 0.9 + i * 1.31) * 0.5;
-          v = Math.max(0.06, (0.45 + n * 0.28) * active);
-        }
-
-        const bh = Math.max(3, v * h * 0.92);
-        const x = i * (barW + gap);
-        const y = h - bh;
-        const grad = ctx.createLinearGradient(0, h, 0, y);
-        grad.addColorStop(0, 'rgba(30, 64, 175, 0.7)');
-        grad.addColorStop(0.6, 'rgba(59, 130, 246, 0.7)');
-        grad.addColorStop(1, 'rgba(147, 197, 253, 0.8)');
-        ctx.fillStyle = grad;
-
-        const r = Math.min(barW / 2, 3);
-        ctx.beginPath();
-        ctx.moveTo(x + r, y);
-        ctx.arcTo(x + barW, y, x + barW, y + bh, r);
-        ctx.arcTo(x + barW, y + bh, x, y + bh, r);
-        ctx.arcTo(x, y + bh, x, y, r);
-        ctx.arcTo(x, y, x + barW, y, r);
-        ctx.closePath();
-        ctx.fill();
-      }
+      this.drawBarsFrame(this.dom.npCanvas, {
+        bars: 48,
+        gap: 3,
+        active: this.isPlaying ? 1 : 0.22,
+      });
     };
 
     draw();
@@ -1259,6 +1304,26 @@ class MusicPlayer {
     }
     const canvas = this.dom.npCanvas;
     if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // --- Mini visualizer di player bar (selalu hidup) ---
+
+  startMiniVisualizer() {
+    if (this.miniAnimId || !this.dom.miniViz) return;
+
+    const draw = () => {
+      this.miniAnimId = requestAnimationFrame(draw);
+      this.drawBarsFrame(this.dom.miniViz, {
+        bars: 14,
+        gap: 2,
+        radius: 1.5,
+        minHeight: 2,
+        speed: 1.35,
+        active: this.isPlaying ? 1 : 0.22,
+      });
+    };
+
+    draw();
   }
 
   // --- Lirik (Better Lyrics + LRCLIB) ---
@@ -1296,9 +1361,17 @@ class MusicPlayer {
     if (!track) {
       this.lyricsTrackId = null;
       this.lyricsDoc = null;
+      this.lyricsMetaKey = null;
+      this.lyricsOffset = 0;
       this.showLyricsState('idle');
       return;
     }
+
+    // Offset sinkronisasi khusus lagu ini (mis. video dengan intro).
+    this.lyricsMetaKey = this.lyrics.offsetKey(track);
+    this.lyricsOffset = this.lyricsMetaKey ? this.lyrics.getOffset(this.lyricsMetaKey) : 0;
+    this.updateLyricsOffsetUI();
+
     if (!force && this.lyricsTrackId === track.id && this.lyricsDoc) {
       this.syncLyricsUI(this.player.currentTime || 0, true);
       return;
@@ -1331,7 +1404,12 @@ class MusicPlayer {
     this.lyricsActiveWord = -1;
     this.lyricElsByIndex = {};
 
-    const provider = doc.provider === 'better' ? 'Better Lyrics' : 'LRCLIB';
+    const providerMeta = {
+      better: { name: 'Better Lyrics', icon: 'fa-bolt' },
+      lrcred: { name: 'LRC.RED', icon: 'fa-fire' },
+      lrclib: { name: 'LRCLIB', icon: 'fa-database' },
+    }[doc.provider] || { name: 'LRCLIB', icon: 'fa-database' };
+    const provider = providerMeta.name;
     let syncLabel = 'tanpa penanda waktu';
     if (doc.instrumental) syncLabel = 'instrumental';
     else if (doc.sync === 'word') syncLabel = 'karaoke per kata';
@@ -1339,8 +1417,9 @@ class MusicPlayer {
     const syncOk = doc.sync !== 'none' && !doc.instrumental;
 
     this.dom.lyricsSource.innerHTML =
-      `<span class="lyrics-badge"><i class="fas ${doc.provider === 'better' ? 'fa-bolt' : 'fa-database'}"></i> ${provider}</span>` +
+      `<span class="lyrics-badge"><i class="fas ${providerMeta.icon}"></i> ${provider}</span>` +
       `<span class="lyrics-sync${syncOk ? ' ok' : ''}">${syncLabel}</span>`;
+    this.updateLyricsOffsetUI();
 
     if (doc.instrumental) {
       this.showLyricsState('instrumental');
@@ -1379,15 +1458,15 @@ class MusicPlayer {
     this.dom.lyricsLines.querySelectorAll('.lyric-line[data-line]').forEach((el) => {
       this.lyricElsByIndex[parseInt(el.dataset.line, 10)] = el;
     });
-    this.setLyricsFoot(`Lirik ${provider} · klik baris untuk melompat`);
+    this.setLyricsFoot(`Lirik ${provider} · klik baris untuk melompat · ± geser waktu`);
     this.dom.lyricsScroll.scrollTop = 0;
     this.syncLyricsUI(this.player.currentTime || 0, true);
   }
 
   showLyricsState(kind) {
     const states = {
-      idle: '<i class="fas fa-align-left"></i><p>Pilih lagu untuk melihat lirik</p><p class="sub">Lirik tersinkron dari Better Lyrics &amp; LRCLIB</p>',
-      loading: '<div class="lyrics-loading"><i class="fas fa-circle-notch fa-spin"></i></div><p>Mencari lirik…</p><p class="sub">Better Lyrics (utama) · LRCLIB (cadangan)</p>',
+      idle: '<i class="fas fa-align-left"></i><p>Pilih lagu untuk melihat lirik</p><p class="sub">Lirik tersinkron dari Better Lyrics, LRC.RED &amp; LRCLIB</p>',
+      loading: '<div class="lyrics-loading"><i class="fas fa-circle-notch fa-spin"></i></div><p>Mencari lirik…</p><p class="sub">Better Lyrics (utama) · LRC.RED · LRCLIB</p>',
       empty: '<i class="fas fa-microphone"></i><p>Lirik tidak tersedia untuk lagu ini</p><p class="sub">Coba tombol muat ulang atau pilih lagu lain.</p>',
       instrumental: '<i class="fas fa-music"></i><p>Lagu instrumental — tanpa lirik</p>',
     };
@@ -1395,6 +1474,7 @@ class MusicPlayer {
     this.dom.lyricsState.style.display = '';
     this.dom.lyricsLines.innerHTML = '';
     this.setLyricsFoot('');
+    this.updateLyricsOffsetUI();
     this.lyricElsByIndex = {};
     this.lyricsActiveLine = -1;
     this.lyricsActiveWord = -1;
@@ -1413,13 +1493,16 @@ class MusicPlayer {
 
     const lines = doc.lines;
 
-    // Baris aktif = baris terakhir yang mulai sebelum t.
+    // Terapkan offset sinkronisasi (positif = lirik digeser lebih lambat).
+    const ts = Math.max(0, t - this.lyricsOffset);
+
+    // Baris aktif = baris terakhir yang mulai sebelum ts.
     let lo = 0;
     let hi = lines.length - 1;
     let idx = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (lines[mid].t <= t + 0.12) {
+      if (lines[mid].t <= ts + 0.12) {
         idx = mid;
         lo = mid + 1;
       } else {
@@ -1452,7 +1535,7 @@ class MusicPlayer {
         let wi = -1;
         for (let j = 0; j < line.words.length; j++) {
           const wt = line.words[j].t;
-          if (wt == null || wt <= t + 0.2) wi = j;
+          if (wt == null || wt <= ts + 0.2) wi = j;
           else break;
         }
         if (wi !== this.lyricsActiveWord || force) {
@@ -1461,6 +1544,39 @@ class MusicPlayer {
         }
       }
     }
+  }
+
+  /**
+   * Geser sinkronisasi lirik lagu ini. delta positif = lirik tampil lebih
+   * lambat (solusi untuk video klip dengan intro). Offset disimpan per lagu.
+   */
+  nudgeLyricsOffset(delta, reset = false) {
+    const doc = this.lyricsDoc;
+    if (!doc || doc.instrumental || doc.sync === 'none' || !doc.lines || !doc.lines.length) return;
+    if (!this.lyricsMetaKey) return;
+
+    const next = reset ? 0 : Math.round((this.lyricsOffset + delta) * 10) / 10;
+    const v = Math.max(-10, Math.min(10, next));
+    if (v === this.lyricsOffset) return;
+
+    this.lyricsOffset = v;
+    this.lyrics.setOffset(this.lyricsMetaKey, v);
+    this.updateLyricsOffsetUI();
+    this.syncLyricsUI(this.player.currentTime || 0, true);
+  }
+
+  updateLyricsOffsetUI() {
+    if (!this.dom.lyricsOffset) return;
+    const doc = this.lyricsDoc;
+    const show = !!(doc && doc.sync !== 'none' && !doc.instrumental && doc.lines && doc.lines.length);
+    this.dom.lyricsOffset.style.display = show ? 'flex' : 'none';
+    if (!show) return;
+
+    const v = this.lyricsOffset;
+    this.dom.lyrOffVal.textContent = `${v > 0 ? '+' : ''}${v.toFixed(1)} dtk`;
+    this.dom.lyrOffVal.classList.toggle('set', v !== 0);
+    this.dom.lyrOffMinus.disabled = v <= -10;
+    this.dom.lyrOffPlus.disabled = v >= 10;
   }
 
   // --- Audio Events ---
@@ -2304,18 +2420,10 @@ class MusicPlayer {
   // --- Visualizer ---
 
   toggleVisualizer() {
-    if (!this.visualizerActive) {
-      const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
-      if (current && current.isOnline) {
-        this.showToast('Visualizer hanya bekerja untuk musik lokal');
-        return;
-      }
-    }
-
     this.visualizerActive = !this.visualizerActive;
     this.dom.visualizerOverlay.classList.toggle('active');
 
-    if (this.visualizerActive && this.analyser) {
+    if (this.visualizerActive) {
       this.startVisualizer();
     } else {
       this.stopVisualizer();
@@ -2324,34 +2432,21 @@ class MusicPlayer {
 
   startVisualizer() {
     const canvas = this.dom.visualizerCanvas;
-    const ctx = canvas.getContext('2d');
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    const bufferLength = this.analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
+    if (!canvas || this.animFrameId) return;
 
     const draw = () => {
       this.animFrameId = requestAnimationFrame(draw);
-      this.analyser.getByteFrequencyData(dataArray);
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      const barWidth = (canvas.width / bufferLength) * 2.5;
-      let x = 0;
-
-      for (let i = 0; i < bufferLength; i++) {
-        const barHeight = (dataArray[i] / 255) * canvas.height * 0.8;
-        const gradient = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - barHeight);
-        gradient.addColorStop(0, '#1e40af');
-        gradient.addColorStop(0.5, '#3b82f6');
-        gradient.addColorStop(1, '#93c5fd');
-
-        ctx.fillStyle = gradient;
-        ctx.fillRect(x, canvas.height - barHeight, barWidth - 1, barHeight);
-        x += barWidth;
-      }
+      this.drawBarsFrame(canvas, {
+        bars: Math.max(32, Math.floor(canvas.width / 9)),
+        gap: 2,
+        rounded: false,
+        trail: 0.3,
+        trailColor: 'rgba(0, 0, 0,',
+        heightScale: 0.8,
+        speed: 0.8,
+        active: this.isPlaying ? 1 : 0.22,
+        colors: ['rgba(30, 64, 175, 0.9)', 'rgba(59, 130, 246, 0.9)', 'rgba(147, 197, 253, 0.95)'],
+      });
     };
 
     draw();
@@ -2450,5 +2545,5 @@ class MusicPlayer {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  new MusicPlayer();
+  window.app = new MusicPlayer();
 });
