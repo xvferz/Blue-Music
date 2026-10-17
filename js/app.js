@@ -17,7 +17,7 @@ class MusicPlayer {
     this.audioCtx = null;
     this.visualizerActive = false;
     this.animFrameId = null;
-    this.miniAnimId = null;
+    this.pbCoverKey = null;
     this.youtube = new YouTubeMusicAPI();
     this.activePlaylist = 'all';
     this.searchDebounceId = null;
@@ -57,7 +57,6 @@ class MusicPlayer {
     this.setupAudioContext();
     this.render();
     this.updatePlayerUI();
-    this.startMiniVisualizer();
     this.initExplore();
   }
 
@@ -152,9 +151,6 @@ class MusicPlayer {
       lyrOffMinus: document.getElementById('lyrOffMinus'),
       lyrOffVal: document.getElementById('lyrOffVal'),
       lyrOffPlus: document.getElementById('lyrOffPlus'),
-
-      // Mini visualizer di player bar
-      miniViz: document.getElementById('miniViz'),
     };
   }
 
@@ -638,8 +634,10 @@ class MusicPlayer {
       this.render();
     } catch (err) {
       this.isLoadingTrack = false;
+      this.isPlaying = false;
       this.showToast('Semua jalur pemutaran gagal. Coba lagu lain.');
       this.updatePlayerUI();
+      this.render();
     }
   }
 
@@ -743,6 +741,14 @@ class MusicPlayer {
       this.player.pause();
       this.isPlaying = false;
     } else {
+      // Lagu yang sudah selesai (atau embed yang belum siap) → putar ulang dari awal.
+      const dur = this.player.duration;
+      const atEnd = dur > 0 && this.player.currentTime >= dur - 0.35;
+      const embedNotReady = this.player.mode === 'embed' && !this.player.ytReady;
+      if (atEnd || embedNotReady) {
+        this.playTrack(this.currentIndex);
+        return;
+      }
       if (this.audioCtx && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume();
       }
@@ -771,6 +777,7 @@ class MusicPlayer {
     this.playTrack(index);
   }
 
+  // Mengembalikan true jika benar-benar pindah ke lagu berikutnya.
   nextTrack() {
     // Antrean manual selalu didahulukan.
     if (this.queue.length) {
@@ -778,10 +785,10 @@ class MusicPlayer {
       this.saveQueue();
       this.renderQueue();
       this.playQueuedTrack(next);
-      return;
+      return true;
     }
 
-    if (this.tracks.length === 0) return;
+    if (this.tracks.length === 0) return false;
 
     let index;
     if (this.shuffleOn) {
@@ -792,11 +799,12 @@ class MusicPlayer {
         if (this.repeatMode === 'all') {
           index = 0;
         } else {
-          return;
+          return false;
         }
       }
     }
     this.playTrack(index);
+    return true;
   }
 
   getRandomIndex() {
@@ -1306,26 +1314,6 @@ class MusicPlayer {
     if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  // --- Mini visualizer di player bar (selalu hidup) ---
-
-  startMiniVisualizer() {
-    if (this.miniAnimId || !this.dom.miniViz) return;
-
-    const draw = () => {
-      this.miniAnimId = requestAnimationFrame(draw);
-      this.drawBarsFrame(this.dom.miniViz, {
-        bars: 14,
-        gap: 2,
-        radius: 1.5,
-        minHeight: 2,
-        speed: 1.35,
-        active: this.isPlaying ? 1 : 0.22,
-      });
-    };
-
-    draw();
-  }
-
   // --- Lirik (Better Lyrics + LRCLIB) ---
 
   currentTrack() {
@@ -1620,15 +1608,25 @@ class MusicPlayer {
     if (this.repeatMode === 'one') {
       this.player.currentTime = 0;
       this.player.resume();
-    } else {
-      this.nextTrack();
+      return;
     }
+    // Tidak ada lagu berikutnya? Pemutaran berhenti — tombol play langsung
+    // kembali ke ikon "putar".
+    if (!this.nextTrack()) this.onPlaybackStopped();
+  }
+
+  onPlaybackStopped() {
+    this.isPlaying = false;
+    this.isLoadingTrack = false;
+    this.updatePlayerUI();
+    this.render();
+    this.refreshSearchResults();
   }
 
   onLocalError() {
     this.isLoadingTrack = false;
     this.showToast('Gagal memuat file audio. Format tidak didukung.');
-    this.nextTrack();
+    if (!this.nextTrack()) this.onPlaybackStopped();
   }
 
   onStreamError() {
@@ -1647,8 +1645,10 @@ class MusicPlayer {
       })
       .catch(() => {
         this.isLoadingTrack = false;
+        this.isPlaying = false;
         this.showToast('Streaming terputus. Coba lagu lain.');
         this.updatePlayerUI();
+        this.refreshSearchResults();
       });
   }
 
@@ -2388,9 +2388,11 @@ class MusicPlayer {
         ? '<i class="fas fa-heart"></i>'
         : '<i class="far fa-heart"></i>';
       this.dom.likeBtn.classList.toggle('liked', track.liked);
+      this.updateNowPlayingCover(track);
     } else {
       this.dom.nowPlayingTitle.textContent = 'Belum ada lagu';
       this.dom.nowPlayingArtist.textContent = 'Tambahkan musik atau streaming online';
+      this.updateNowPlayingCover(null);
     }
 
     this.dom.playBtn.innerHTML = this.isPlaying
@@ -2401,6 +2403,28 @@ class MusicPlayer {
     this.renderNowPlaying();
     this.renderQueue();
     if (this.lyricsPaneVisible()) this.ensureLyricsForCurrent();
+  }
+
+  // Visualizer album di player bar: sampul lagu + bar equalizer kecil.
+  updateNowPlayingCover(track) {
+    const cover = this.dom.nowPlayingCover;
+    if (!cover) return;
+
+    const key = track ? `${track.id}|${track.artwork || ''}` : 'empty';
+    if (this.pbCoverKey !== key) {
+      this.pbCoverKey = key;
+
+      const eq = '<div class="cover-eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>';
+      if (!track) {
+        cover.innerHTML = '<i class="fas fa-music"></i>';
+      } else if (track.artwork) {
+        cover.innerHTML = `<img src="${track.artwork}" alt="" loading="lazy" decoding="async" onerror="this.remove()">${eq}`;
+      } else {
+        cover.innerHTML = this.defaultArtworkHtml(track) + eq;
+      }
+    }
+
+    cover.classList.toggle('playing', !!(track && this.isPlaying));
   }
 
   updateVolumeUI() {

@@ -2044,18 +2044,56 @@ html, body {
   font-weight: 600;
 }
 
-/* Mini visualizer di player bar */
-.mini-viz {
-  width: 76px;
-  height: 30px;
-  flex-shrink: 0;
-  border-radius: 6px;
-  background: rgba(59, 130, 246, 0.06);
-  border: 1px solid rgba(59, 130, 246, 0.12);
+/* Visualizer album di player bar (sampul + bar equalizer kecil) */
+.now-playing-cover {
+  position: relative;
+  overflow: hidden;
 }
 
-@media (max-width: 1150px) {
-  .mini-viz {
-    display: none;
-  }
+.now-playing-cover.playing {
+  animation: pbCoverGlow 3.2s ease-in-out infinite;
+}
+
+@keyframes pbCoverGlow {
+  0%, 100% { box-shadow: 0 0 0 rgba(59, 130, 246, 0); }
+  50% { box-shadow: 0 0 16px rgba(59, 130, 246, 0.45); }
+}
+
+.cover-eq {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 20px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 8px 4px;
+  background: linear-gradient(180deg, transparent, rgba(4, 10, 26, 0.6));
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+
+.now-playing-cover.playing .cover-eq {
+  opacity: 1;
+}
+
+.cover-eq span {
+  width: 3px;
+  border-radius: 1.5px;
+  background: linear-gradient(180deg, #bfdbfe, #3b82f6);
+  transform-origin: bottom;
+  animation: coverEq 0.85s ease-in-out infinite;
+}
+
+.cover-eq span:nth-child(1) { height: 6px;  animation-delay: 0s; }
+.cover-eq span:nth-child(2) { height: 12px; animation-delay: 0.18s; }
+.cover-eq span:nth-child(3) { height: 8px;  animation-delay: 0.05s; }
+.cover-eq span:nth-child(4) { height: 14px; animation-delay: 0.28s; }
+.cover-eq span:nth-child(5) { height: 7px;  animation-delay: 0.12s; }
+
+@keyframes coverEq {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
 }
