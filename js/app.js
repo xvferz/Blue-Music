@@ -24,6 +24,13 @@ class MusicPlayer {
     this.searchOnlineResults = [];
     this.onlineQueue = [];
     this.embedSkipCount = 0;
+    this.queue = [];
+    this.downloadInFlight = false;
+    this.searchArtists = [];
+    this.playlistNames = { all: 'Semua Lagu', liked: 'Lagu Disukai' };
+    this.npAnimId = null;
+    this.npLastTrackId = null;
+    this._queueRenderKey = null;
 
     this.init();
   }
@@ -32,6 +39,8 @@ class MusicPlayer {
     this.cacheDOM();
     this.bindEvents();
     this.loadState();
+    this.loadLiked();
+    this.loadQueue();
     this.setupAudioContext();
     this.render();
     this.updatePlayerUI();
@@ -101,6 +110,18 @@ class MusicPlayer {
       exploreResultsSection: document.getElementById('exploreResultsSection'),
       exploreResultCount: document.getElementById('exploreResultCount'),
       refreshTrending: document.getElementById('refreshTrending'),
+
+      // Halaman Antrean / Sekarang Diputar
+      npCanvas: document.getElementById('npCanvas'),
+      npArtwork: document.getElementById('npArtwork'),
+      npTitle: document.getElementById('npTitle'),
+      npArtist: document.getElementById('npArtist'),
+      albumVisual: document.getElementById('albumVisual'),
+      queueNow: document.getElementById('queueNow'),
+      queueList: document.getElementById('queueList'),
+      queueCount: document.getElementById('queueCount'),
+      clearQueueBtn: document.getElementById('clearQueueBtn'),
+      trackListTitle: document.getElementById('trackListTitle'),
     };
   }
 
@@ -123,8 +144,11 @@ class MusicPlayer {
     this.dom.muteBtn.addEventListener('click', () => this.toggleMute());
     this.dom.likeBtn.addEventListener('click', () => this.toggleLike());
 
-    this.dom.progressBar.addEventListener('click', (e) => this.seek(e));
-    this.dom.volumeBar.addEventListener('click', (e) => this.setVolume(e));
+    // Slider volume & progress mendukung klik sekaligus geser (drag).
+    this.setupSlider(this.dom.volumeBar, (ratio) => this.applyVolume(ratio));
+    this.setupSlider(this.dom.progressBar, (ratio) => this.applySeek(ratio));
+
+    this.dom.clearQueueBtn.addEventListener('click', () => this.clearQueue());
 
     document.addEventListener('keydown', (e) => this.handleKeyboard(e));
 
@@ -318,6 +342,105 @@ class MusicPlayer {
     }
   }
 
+  // --- Baris lagu online (dipakai di pencarian, jelajahi, halaman artis) ---
+
+  onlineRowHtml(track, i, query = '') {
+    const duration = track.duration ? this.formatTime(track.duration) : '--:--';
+    const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+    const isPlaying = current && current.id === track.id;
+    const isLiked = this.playlists.liked.some(t => t.id === track.id);
+    const title = query ? this.highlightMatch(this.escapeHtml(track.title), query) : this.escapeHtml(track.title);
+    const artist = query ? this.highlightMatch(this.escapeHtml(track.artist), query) : this.escapeHtml(track.artist);
+
+    return `
+      <div class="track-item ${isPlaying ? 'playing' : ''}" data-online-id="${track.id}">
+        <span class="track-index">${isPlaying ? '<i class="fas fa-volume-up" style="color:var(--accent-primary)"></i>' : (i + 1)}</span>
+        <div class="track-info">
+          <div class="track-name">${title} <span class="track-source">YouTube</span></div>
+          <div class="track-artist-name">${artist}</div>
+        </div>
+        <span class="track-duration">${duration}</span>
+        <div class="track-actions">
+          <button class="track-like-btn" data-id="${track.id}" title="Sukai">
+            <i class="${isLiked ? 'fas' : 'far'} fa-heart"></i>
+          </button>
+          <button class="track-queue-btn" data-id="${track.id}" title="Tambahkan ke antrean">
+            <i class="fas fa-plus"></i>
+          </button>
+          <button class="track-dl-btn" data-id="${track.id}" title="Download">
+            <i class="fas fa-download"></i>
+          </button>
+        </div>
+      </div>`;
+  }
+
+  wireOnlineRows(container, tracks, query = '') {
+    const findTrack = (el) => {
+      const id = el.dataset.onlineId || el.dataset.id;
+      return tracks.find(t => t.id === id);
+    };
+
+    container.querySelectorAll('.track-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.track-actions')) return;
+        const track = findTrack(el);
+        if (track) {
+          this.playOnlineTrack(track, tracks);
+          this.openQueuePage();
+        }
+      });
+    });
+
+    container.querySelectorAll('.track-like-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = findTrack(btn);
+        if (!track) return;
+
+        const likedNow = this.playlists.liked.some(t => t.id === track.id);
+        track.liked = !likedNow;
+
+        const entry = this.tracks.find(t => t.id === track.id);
+        if (entry) entry.liked = track.liked;
+
+        if (track.liked) {
+          if (!likedNow) this.playlists.liked.push(entry || track);
+        } else {
+          this.playlists.liked = this.playlists.liked.filter(t => t.id !== track.id);
+        }
+        this.saveLiked();
+
+        // Perbarui ikon hati tanpa merender ulang seluruh baris.
+        container.querySelectorAll('.track-item').forEach(row => {
+          const t = findTrack(row);
+          if (!t) return;
+          const icon = row.querySelector('.track-like-btn i');
+          if (icon) {
+            const liked = this.playlists.liked.some(x => x.id === t.id);
+            icon.className = liked ? 'fas fa-heart' : 'far fa-heart';
+          }
+        });
+        this.updatePlayerUI();
+      });
+    });
+
+    container.querySelectorAll('.track-queue-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = findTrack(btn);
+        if (track) this.addToQueue(track);
+      });
+    });
+
+    container.querySelectorAll('.track-dl-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = findTrack(btn);
+        if (track) this.downloadOnlineTrack(track);
+      });
+    });
+  }
+
   renderOnlineCards(container, tracks) {
     if (!tracks.length) {
       container.innerHTML = '<div class="empty-state"><i class="fas fa-music"></i><p>Tidak ada lagu ditemukan</p></div>';
@@ -334,6 +457,9 @@ class MusicPlayer {
         <div class="music-card online-card" data-online-id="${track.id}">
           <div class="music-card-cover ${track.artwork ? 'has-artwork' : ''}">
             ${artworkStyle || '<i class="fas fa-music"></i>'}
+            <button class="card-queue-btn" data-online-id="${track.id}" title="Tambahkan ke antrean">
+              <i class="fas fa-plus"></i>
+            </button>
             <div class="play-overlay">
               <i class="fas fa-play-circle"></i>
             </div>
@@ -344,11 +470,22 @@ class MusicPlayer {
         </div>`;
     }).join('');
 
+    container.querySelectorAll('.card-queue-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = tracks.find(t => t.id === btn.dataset.onlineId);
+        if (track) this.addToQueue(track);
+      });
+    });
+
     container.querySelectorAll('.online-card').forEach(card => {
       card.addEventListener('click', () => {
         const onlineId = card.dataset.onlineId;
         const track = this.onlineTracks.find(t => t.id === onlineId);
-        if (track) this.playOnlineTrack(track, this.onlineTracks);
+        if (track) {
+          this.playOnlineTrack(track, this.onlineTracks);
+          this.openQueuePage();
+        }
       });
     });
   }
@@ -374,26 +511,9 @@ class MusicPlayer {
 
       this.onlineTracks = tracks;
 
-      container.innerHTML = tracks.map((track, i) => {
-        const duration = track.duration ? this.formatTime(track.duration) : '--:--';
-        return `
-          <div class="track-item" data-online-id="${track.id}">
-            <span class="track-index">${i + 1}</span>
-            <div class="track-info">
-              <div class="track-name">${this.highlightMatch(this.escapeHtml(track.title), query)}</div>
-              <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
-            </div>
-            <span class="track-duration">${duration}</span>
-          </div>`;
-      }).join('');
+      container.innerHTML = tracks.map((track, i) => this.onlineRowHtml(track, i, query)).join('');
+      this.wireOnlineRows(container, tracks, query);
 
-      container.querySelectorAll('.track-item').forEach(el => {
-        el.addEventListener('click', (e) => {
-          const track = this.onlineTracks.find(t => t.id === el.dataset.onlineId);
-          if (track) this.playOnlineTrack(track, this.onlineTracks);
-        });
-      });
-      
     } catch (error) {
       // TAMPILKAN PESAN ERROR JIKA GAGAL
       container.innerHTML = `
@@ -461,10 +581,6 @@ class MusicPlayer {
       this.showToast('Semua jalur pemutaran gagal. Coba lagu lain.');
       this.updatePlayerUI();
     }
-  }
-
-  async downloadOnlineTrack(track) {
-    this.showToast('Download hanya tersedia untuk musik lokal.');
   }
 
   // --- Local File Handling ---
@@ -596,6 +712,15 @@ class MusicPlayer {
   }
 
   nextTrack() {
+    // Antrean manual selalu didahulukan.
+    if (this.queue.length) {
+      const next = this.queue.shift();
+      this.saveQueue();
+      this.renderQueue();
+      this.playQueuedTrack(next);
+      return;
+    }
+
     if (this.tracks.length === 0) return;
 
     let index;
@@ -671,20 +796,62 @@ class MusicPlayer {
     } else {
       this.playlists.liked = this.playlists.liked.filter(t => t.id !== track.id);
     }
+    this.saveLiked();
     this.render();
   }
 
-  seek(e) {
-    const rect = this.dom.progressBar.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    this.player.currentTime = ratio * this.player.duration;
+  // --- Slider (volume & progress) — klik dan geser ---
+
+  setupSlider(el, onRatio) {
+    if (!el) return;
+
+    const ratioFromEvent = (e) => {
+      const rect = el.getBoundingClientRect();
+      if (!rect.width) return 0;
+      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    };
+
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { el.setPointerCapture(e.pointerId); } catch (err) { /* abaikan */ }
+      el.classList.add('dragging');
+      onRatio(ratioFromEvent(e));
+
+      const move = (ev) => onRatio(ratioFromEvent(ev));
+      const up = () => {
+        el.classList.remove('dragging');
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+      };
+
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    });
   }
 
-  setVolume(e) {
-    const rect = this.dom.volumeBar.getBoundingClientRect();
-    this.volume = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  applyVolume(ratio) {
+    this.volume = ratio;
+    if (ratio > 0 && this.isMuted) {
+      this.isMuted = false;
+      this.player.setMuted(false);
+    }
     this.player.setVolume(this.volume);
+    this.dom.muteBtn.innerHTML = this.volume > 0.5
+      ? '<i class="fas fa-volume-up"></i>'
+      : this.volume > 0
+        ? '<i class="fas fa-volume-down"></i>'
+        : '<i class="fas fa-volume-off"></i>';
     this.updateVolumeUI();
+  }
+
+  applySeek(ratio) {
+    const duration = this.player.duration;
+    if (!duration) return;
+    this.player.currentTime = ratio * duration;
+    this.dom.progressFill.style.width = `${ratio * 100}%`;
+    this.dom.currentTime.textContent = this.formatTime(ratio * duration);
   }
 
   downloadTrack() {
@@ -695,7 +862,7 @@ class MusicPlayer {
 
     const track = this.tracks[this.currentIndex];
     if (track.isOnline) {
-      this.showToast('Download hanya tersedia untuk musik lokal.');
+      this.downloadOnlineTrack(track);
       return;
     }
 
@@ -706,6 +873,345 @@ class MusicPlayer {
     a.click();
     document.body.removeChild(a);
     this.showToast(`Mendownload: ${track.title}`);
+  }
+
+  // --- Download lagu online ---
+
+  async downloadOnlineTrack(track) {
+    if (!track || !track.videoId) {
+      this.showToast('Lagu ini tidak bisa diunduh.');
+      return;
+    }
+    if (this.downloadInFlight) {
+      this.showToast('Masih ada unduhan yang sedang disiapkan…');
+      return;
+    }
+
+    this.downloadInFlight = true;
+    this.showToast('Menyiapkan unduhan… (bisa ±30 detik)');
+
+    try {
+      const url = await this.youtube.getDownloadUrl(track.videoId, (pct) => {
+        this.showToast(`Menyiapkan unduhan… ${pct}%`);
+      });
+      this.showToast(`Unduhan siap: ${track.title}`);
+
+      // iframe tersembunyi: file dikirim dengan header
+      // Content-Disposition attachment sehingga langsung terunduh
+      // tanpa diblokir popup blocker.
+      const frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      frame.src = url;
+      document.body.appendChild(frame);
+      setTimeout(() => {
+        try { frame.remove(); } catch (e) { /* abaikan */ }
+      }, 120000);
+    } catch (err) {
+      console.warn('[Download] Gagal:', err && err.message);
+      this.showToast('Gagal menyiapkan unduhan. Coba lagi sebentar lagi.');
+    } finally {
+      this.downloadInFlight = false;
+    }
+  }
+
+  // --- Antrean (queue) ---
+
+  openQueuePage() {
+    this.switchPage('now');
+  }
+
+  addToQueue(track) {
+    if (!track) return;
+    const entry = this.tracks.find(t => t.id === track.id);
+    this.queue.push(entry || { ...track });
+    this.saveQueue();
+    this.renderQueue();
+    this.showToast(`Ditambahkan ke antrean: ${track.title}`);
+  }
+
+  removeFromQueue(i) {
+    if (i < 0 || i >= this.queue.length) return;
+    this.queue.splice(i, 1);
+    this.saveQueue();
+    this.renderQueue();
+  }
+
+  clearQueue() {
+    if (!this.queue.length) {
+      this.showToast('Antrean sudah kosong');
+      return;
+    }
+    this.queue = [];
+    this.saveQueue();
+    this.renderQueue();
+    this.showToast('Antrean dibersihkan');
+  }
+
+  playFromQueue(i) {
+    if (i < 0 || i >= this.queue.length) return;
+    const track = this.queue.splice(i, 1)[0];
+    this.saveQueue();
+    this.renderQueue();
+    this.playQueuedTrack(track);
+  }
+
+  playQueuedTrack(track) {
+    if (!track) return;
+    const existing = this.tracks.find(t => t.id === track.id);
+    const target = existing || track;
+
+    if (target.isOnline || target.source === 'youtube') {
+      this.playOnlineTrack(target, this.queue.slice());
+      return;
+    }
+    if (existing) this.playTrack(this.tracks.indexOf(existing));
+  }
+
+  saveQueue() {
+    try {
+      const data = this.queue
+        .filter(t => t && (t.isOnline || t.source === 'youtube'))
+        .map(t => ({
+          id: t.id,
+          videoId: t.videoId,
+          title: t.title,
+          artist: t.artist,
+          duration: t.duration || 0,
+          artwork: t.artwork || null,
+          source: 'youtube',
+          isOnline: true,
+        }));
+      localStorage.setItem('bluesync_queue', JSON.stringify(data));
+    } catch (e) { /* abaikan */ }
+  }
+
+  loadQueue() {
+    try {
+      const raw = localStorage.getItem('bluesync_queue');
+      const list = raw ? JSON.parse(raw) : [];
+      this.queue = Array.isArray(list) ? list.filter(t => t && t.id) : [];
+    } catch (e) {
+      this.queue = [];
+    }
+  }
+
+  // --- Lagu disukai (persisten untuk lagu online) ---
+
+  saveLiked() {
+    try {
+      const data = this.playlists.liked
+        .filter(t => t && (t.isOnline || t.source === 'youtube'))
+        .map(t => ({
+          id: t.id,
+          videoId: t.videoId,
+          title: t.title,
+          artist: t.artist,
+          duration: t.duration || 0,
+          artwork: t.artwork || null,
+          source: 'youtube',
+          isOnline: true,
+          liked: true,
+        }));
+      localStorage.setItem('bluesync_liked', JSON.stringify(data));
+    } catch (e) { /* abaikan */ }
+  }
+
+  loadLiked() {
+    try {
+      const raw = localStorage.getItem('bluesync_liked');
+      const list = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(list)) return;
+      for (const t of list) {
+        if (!t || !t.id) continue;
+        let entry = this.tracks.find(x => x.id === t.id);
+        if (!entry) {
+          entry = { ...t, liked: true };
+          this.tracks.push(entry);
+        }
+        entry.liked = true;
+        if (!this.playlists.liked.find(x => x.id === entry.id)) {
+          this.playlists.liked.push(entry);
+        }
+      }
+    } catch (e) { /* abaikan */ }
+  }
+
+  // --- Halaman Antrean / Sekarang Diputar ---
+
+  renderQueue() {
+    const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+    const key = (current ? current.id : '') + '|' + this.isPlaying + '|' + this.queue.map(t => t.id).join(',');
+    if (key === this._queueRenderKey) return;
+    this._queueRenderKey = key;
+
+    this.dom.queueCount.textContent = `${this.queue.length} lagu`;
+
+    if (current) {
+      this.dom.queueNow.innerHTML = `
+        <div class="queue-now-label"><i class="fas fa-volume-up"></i> Sedang diputar</div>
+        <div class="track-item queue-current">
+          <span class="track-index">${this.isPlaying ? '<i class="fas fa-volume-up" style="color:var(--accent-primary)"></i>' : '<i class="fas fa-pause"></i>'}</span>
+          <div class="track-info">
+            <div class="track-name">${this.escapeHtml(current.title)}${current.isOnline ? ' <span class="track-source">YouTube</span>' : ''}</div>
+            <div class="track-artist-name">${this.escapeHtml(current.artist)}</div>
+          </div>
+          <span class="track-duration">${current.duration ? this.formatTime(current.duration) : '--:--'}</span>
+        </div>`;
+    } else {
+      this.dom.queueNow.innerHTML = '<div class="queue-now-label"><i class="fas fa-music"></i> Belum ada lagu diputar</div>';
+    }
+
+    if (!this.queue.length) {
+      this.dom.queueList.innerHTML = `
+        <div class="empty-state queue-empty">
+          <i class="fas fa-list-ul"></i>
+          <p>Antrean kosong</p>
+          <p style="font-size:13px;margin-top:6px">Tekan tombol <strong>+</strong> pada lagu mana pun untuk menambahkannya ke antrean.</p>
+        </div>`;
+      return;
+    }
+
+    this.dom.queueList.innerHTML = this.queue.map((track, i) => `
+      <div class="track-item queue-item" data-queue-index="${i}">
+        <span class="track-index">${i + 1}</span>
+        <div class="track-info">
+          <div class="track-name">${this.escapeHtml(track.title)}${track.isOnline || track.source === 'youtube' ? ' <span class="track-source">YouTube</span>' : ''}</div>
+          <div class="track-artist-name">${this.escapeHtml(track.artist)}</div>
+        </div>
+        <span class="track-duration">${track.duration ? this.formatTime(track.duration) : '--:--'}</span>
+        <div class="track-actions">
+          <button class="track-remove-btn" data-queue-index="${i}" title="Hapus dari antrean">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+      </div>`).join('');
+
+    this.dom.queueList.querySelectorAll('.queue-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.track-actions')) return;
+        const i = parseInt(el.dataset.queueIndex, 10);
+        if (!isNaN(i)) this.playFromQueue(i);
+      });
+    });
+
+    this.dom.queueList.querySelectorAll('.track-remove-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const i = parseInt(btn.dataset.queueIndex, 10);
+        if (!isNaN(i)) this.removeFromQueue(i);
+      });
+    });
+  }
+
+  renderNowPlaying() {
+    const track = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+
+    if (track) {
+      this.dom.npTitle.textContent = track.title;
+      this.dom.npArtist.textContent = track.artist + (track.isOnline ? ' · YouTube' : '');
+
+      if (this.npLastTrackId !== track.id) {
+        this.npLastTrackId = track.id;
+        this.dom.npArtwork.innerHTML = track.artwork
+          ? `<img src="${track.artwork}" alt="" onerror="this.remove()">`
+          : this.defaultArtworkHtml(track);
+      }
+      this.dom.albumVisual.classList.toggle('playing', this.isPlaying);
+    } else {
+      this.dom.npTitle.textContent = 'Belum ada lagu';
+      this.dom.npArtist.textContent = 'Pilih lagu untuk mulai';
+      if (this.npLastTrackId !== null) {
+        this.npLastTrackId = null;
+        this.dom.npArtwork.innerHTML = '<i class="fas fa-music"></i>';
+      }
+      this.dom.albumVisual.classList.remove('playing');
+    }
+  }
+
+  defaultArtworkHtml(track) {
+    const hue = this.hashHue(track.artist || track.title || 'blue');
+    return `<div class="album-art-fallback" style="background:linear-gradient(135deg, hsl(${hue},60%,30%), hsl(${(hue + 40) % 360},70%,16%))"><i class="fas fa-music"></i></div>`;
+  }
+
+  hashHue(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 360;
+    return h;
+  }
+
+  // --- Visualizer album (canvas halaman antrean) ---
+
+  startNpVisualizer() {
+    if (this.npAnimId) return;
+    const canvas = this.dom.npCanvas;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dataArray = this.analyser ? new Uint8Array(this.analyser.frequencyBinCount) : null;
+
+    const draw = () => {
+      this.npAnimId = requestAnimationFrame(draw);
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width && (canvas.width !== Math.floor(rect.width) || canvas.height !== Math.floor(rect.height))) {
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+      }
+      const w = canvas.width;
+      const h = canvas.height;
+      if (!w || !h) return;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const useReal = this.analyser && this.player.mode === 'local' && this.audioCtx && this.audioCtx.state === 'running';
+      if (useReal) this.analyser.getByteFrequencyData(dataArray);
+
+      const bars = 48;
+      const gap = 3;
+      const barW = (w - gap * (bars - 1)) / bars;
+      const t = performance.now() / 1000;
+      const active = this.isPlaying ? 1 : 0.22;
+
+      for (let i = 0; i < bars; i++) {
+        let v;
+        if (useReal && dataArray) {
+          v = dataArray[Math.floor((i / bars) * dataArray.length)] / 255;
+        } else {
+          // Pola sintetis lembut untuk pemutaran online (embed).
+          const n = Math.sin(t * 1.7 + i * 0.55) * 0.5 + Math.sin(t * 0.9 + i * 1.31) * 0.5;
+          v = Math.max(0.06, (0.45 + n * 0.28) * active);
+        }
+
+        const bh = Math.max(3, v * h * 0.92);
+        const x = i * (barW + gap);
+        const y = h - bh;
+        const grad = ctx.createLinearGradient(0, h, 0, y);
+        grad.addColorStop(0, 'rgba(30, 64, 175, 0.7)');
+        grad.addColorStop(0.6, 'rgba(59, 130, 246, 0.7)');
+        grad.addColorStop(1, 'rgba(147, 197, 253, 0.8)');
+        ctx.fillStyle = grad;
+
+        const r = Math.min(barW / 2, 3);
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + barW, y, x + barW, y + bh, r);
+        ctx.arcTo(x + barW, y + bh, x, y + bh, r);
+        ctx.arcTo(x, y + bh, x, y, r);
+        ctx.arcTo(x, y, x + barW, y, r);
+        ctx.closePath();
+        ctx.fill();
+      }
+    };
+
+    draw();
+  }
+
+  stopNpVisualizer() {
+    if (this.npAnimId) {
+      cancelAnimationFrame(this.npAnimId);
+      this.npAnimId = null;
+    }
+    const canvas = this.dom.npCanvas;
+    if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   }
 
   // --- Audio Events ---
@@ -871,12 +1377,22 @@ class MusicPlayer {
     });
     if (page === 'search') this.dom.searchInput.focus();
     if (page === 'explore') this.dom.exploreSearchInput.focus();
+
+    if (page === 'now') {
+      this.renderNowPlaying();
+      this.renderQueue();
+      this.startNpVisualizer();
+    } else {
+      this.stopNpVisualizer();
+    }
   }
 
   switchPlaylist(id, element) {
     this.activePlaylist = id;
     this.dom.playlistList.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'));
     if (element) element.classList.add('active');
+    this.dom.trackListTitle.textContent = this.playlistNames[id] || 'Playlist';
+    this.switchPage('home');
     this.renderTracks(id);
   }
 
@@ -899,6 +1415,7 @@ class MusicPlayer {
 
     const id = 'playlist_' + Date.now();
     this.playlists[id] = [];
+    this.playlistNames[id] = name;
 
     const item = document.createElement('div');
     item.className = 'playlist-item';
@@ -906,11 +1423,7 @@ class MusicPlayer {
     item.innerHTML = `<i class="fas fa-list"></i><span>${this.escapeHtml(name)}</span>`;
     this.dom.playlistList.appendChild(item);
 
-    item.addEventListener('click', () => {
-      this.dom.playlistList.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'));
-      item.classList.add('active');
-      this.renderTracks(id);
-    });
+    item.addEventListener('click', () => this.switchPlaylist(id, item));
 
     this.closePlaylistModal();
     this.showToast(`Playlist "${name}" berhasil dibuat`);
@@ -944,9 +1457,8 @@ class MusicPlayer {
       const idx = this.tracks.indexOf(track);
       const isPlaying = idx === this.currentIndex && this.isPlaying;
       const duration = track.duration ? this.formatTime(track.duration) : '--:--';
-      const srcBadge = track.source === 'youtube' || track.isOnline
-        ? '<span class="track-source">YouTube</span>'
-        : '';
+      const isOnline = track.isOnline || track.source === 'youtube';
+      const srcBadge = isOnline ? '<span class="track-source">YouTube</span>' : '';
 
       return `
         <div class="track-item ${isPlaying ? 'playing' : ''}" data-index="${idx}" data-playlist="${playlistId}">
@@ -957,13 +1469,15 @@ class MusicPlayer {
           </div>
           <span class="track-duration">${duration}</span>
           <div class="track-actions">
+            <button class="track-queue-btn" data-id="${track.id}" title="Tambahkan ke antrean">
+              <i class="fas fa-plus"></i>
+            </button>
             <button class="track-like-btn" data-id="${track.id}" title="Sukai">
               <i class="${track.liked ? 'fas' : 'far'} fa-heart"></i>
             </button>
-            ${track.isOnline || track.source === 'youtube' ? '' : `
             <button class="track-dl-btn" data-id="${track.id}" title="Download">
               <i class="fas fa-download"></i>
-            </button>`}
+            </button>
           </div>
         </div>`;
     }).join('');
@@ -972,7 +1486,18 @@ class MusicPlayer {
       el.addEventListener('click', (e) => {
         if (e.target.closest('.track-actions')) return;
         const idx = parseInt(el.dataset.index);
-        if (!isNaN(idx)) this.playTrack(idx);
+        if (!isNaN(idx)) {
+          this.playTrack(idx);
+          this.openQueuePage();
+        }
+      });
+    });
+
+    container.querySelectorAll('.track-queue-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = this.tracks.find(t => t.id === btn.dataset.id);
+        if (track) this.addToQueue(track);
       });
     });
 
@@ -989,6 +1514,7 @@ class MusicPlayer {
           } else {
             this.playlists.liked = this.playlists.liked.filter(t2 => t2.id !== track.id);
           }
+          this.saveLiked();
           this.render();
           this.updatePlayerUI();
         }
@@ -999,14 +1525,18 @@ class MusicPlayer {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const track = this.tracks.find(t => t.id === btn.dataset.id);
-        if (track && !track.isOnline && track.source !== 'youtube') {
-          const a = document.createElement('a');
-          a.href = track.url;
-          a.download = track.title + '.mp3';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+        if (!track) return;
+        if (track.isOnline || track.source === 'youtube') {
+          this.downloadOnlineTrack(track);
+          return;
         }
+        const a = document.createElement('a');
+        a.href = track.url;
+        a.download = (track.artist !== 'Artis Tidak Diketahui' ? track.artist + ' - ' : '') + track.title + '.mp3';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        this.showToast(`Mendownload: ${track.title}`);
       });
     });
   }
@@ -1042,7 +1572,10 @@ class MusicPlayer {
     container.querySelectorAll('.music-card').forEach(card => {
       card.addEventListener('click', () => {
         const idx = parseInt(card.dataset.index);
-        if (!isNaN(idx)) this.playTrack(idx);
+        if (!isNaN(idx)) {
+          this.playTrack(idx);
+          this.openQueuePage();
+        }
       });
     });
   }
@@ -1159,6 +1692,7 @@ class MusicPlayer {
 
   renderSearchIdle() {
     this.searchOnlineResults = [];
+    this.searchArtists = [];
     this.dom.searchResults.innerHTML = `
       <div class="empty-state">
         <i class="fas fa-search"></i>
@@ -1176,6 +1710,13 @@ class MusicPlayer {
           <span class="track-count" id="searchLocalCount"></span>
         </div>
         <div class="track-list" id="searchLocalResults"></div>
+      </div>
+      <div class="search-section" id="searchArtistsSection" style="display:none">
+        <div class="section-header">
+          <h2>Artis</h2>
+          <span class="track-count" id="searchArtistsCount"></span>
+        </div>
+        <div class="artist-row" id="searchArtistsRow"></div>
       </div>
       <div class="search-section">
         <div class="section-header">
@@ -1221,10 +1762,13 @@ class MusicPlayer {
           </div>
           <span class="track-duration">${track.duration ? this.formatTime(track.duration) : '--:--'}</span>
           <div class="track-actions">
-            <button class="track-like-btn" data-id="${track.id}">
+            <button class="track-queue-btn" data-id="${track.id}" title="Tambahkan ke antrean">
+              <i class="fas fa-plus"></i>
+            </button>
+            <button class="track-like-btn" data-id="${track.id}" title="Sukai">
               <i class="${track.liked ? 'fas' : 'far'} fa-heart"></i>
             </button>
-            <button class="track-dl-btn" data-id="${track.id}">
+            <button class="track-dl-btn" data-id="${track.id}" title="Download">
               <i class="fas fa-download"></i>
             </button>
           </div>
@@ -1235,7 +1779,18 @@ class MusicPlayer {
       el.addEventListener('click', (e) => {
         if (e.target.closest('.track-actions')) return;
         const idx = parseInt(el.dataset.index);
-        if (!isNaN(idx)) this.playTrack(idx);
+        if (!isNaN(idx)) {
+          this.playTrack(idx);
+          this.openQueuePage();
+        }
+      });
+    });
+
+    list.querySelectorAll('.track-queue-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const track = this.tracks.find(t => t.id === btn.dataset.id);
+        if (track) this.addToQueue(track);
       });
     });
 
@@ -1252,6 +1807,7 @@ class MusicPlayer {
           } else {
             this.playlists.liked = this.playlists.liked.filter(t2 => t2.id !== track.id);
           }
+          this.saveLiked();
           this.render();
           this.updatePlayerUI();
         }
@@ -1262,14 +1818,14 @@ class MusicPlayer {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const track = this.tracks.find(t => t.id === btn.dataset.id);
-        if (track && !track.isOnline && track.source !== 'youtube') {
-          const a = document.createElement('a');
-          a.href = track.url;
-          a.download = track.title + '.mp3';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-        }
+        if (!track) return;
+        const a = document.createElement('a');
+        a.href = track.url;
+        a.download = (track.artist !== 'Artis Tidak Diketahui' ? track.artist + ' - ' : '') + track.title + '.mp3';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        this.showToast(`Mendownload: ${track.title}`);
       });
     });
   }
@@ -1280,6 +1836,7 @@ class MusicPlayer {
     if (!list || !count) return;
     count.textContent = '';
     list.innerHTML = '<div class="empty-state"><i class="fas fa-keyboard"></i><p>Ketik minimal 2 huruf untuk mencari online…</p></div>';
+    this.hideSearchArtists();
   }
 
   renderSearchOnlineLoading() {
@@ -1288,6 +1845,12 @@ class MusicPlayer {
     if (!list || !count) return;
     count.textContent = '';
     list.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner"></i><p>Mencari online...</p></div>';
+    this.hideSearchArtists();
+  }
+
+  hideSearchArtists() {
+    const section = document.getElementById('searchArtistsSection');
+    if (section) section.style.display = 'none';
   }
 
   renderSearchOnlinePart(query, tracks) {
@@ -1303,40 +1866,131 @@ class MusicPlayer {
           <p>Gagal mencari lagu online.</p>
           <p style="font-size:13px;margin-top:8px">Semua server publik sedang sibuk — coba lagi sebentar lagi.</p>
         </div>`;
+      this.hideSearchArtists();
       return;
     }
 
     if (!tracks.length) {
       count.textContent = '0 hasil';
       list.innerHTML = `<div class="empty-state"><i class="fas fa-search"></i><p>Tidak ditemukan hasil untuk "${this.escapeHtml(query)}"</p></div>`;
+      this.hideSearchArtists();
       return;
     }
 
     count.textContent = `${tracks.length} hasil`;
 
-    const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+    list.innerHTML = tracks.map((track, i) => this.onlineRowHtml(track, i, query)).join('');
+    this.wireOnlineRows(list, tracks, query);
+    this.renderSearchArtists(tracks);
+  }
 
-    list.innerHTML = tracks.map((track, i) => {
-      const duration = track.duration ? this.formatTime(track.duration) : '--:--';
-      const isPlaying = current && current.id === track.id;
+  // --- Artis di halaman pencarian ---
 
-      return `
-        <div class="track-item ${isPlaying ? 'playing' : ''}" data-online-id="${track.id}">
-          <span class="track-index">${isPlaying ? '<i class="fas fa-volume-up" style="color:var(--accent-primary)"></i>' : (i + 1)}</span>
-          <div class="track-info">
-            <div class="track-name">${this.highlightMatch(this.escapeHtml(track.title), query)}</div>
-            <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
-          </div>
-          <span class="track-duration">${duration}</span>
-        </div>`;
-    }).join('');
+  renderSearchArtists(tracks) {
+    const section = document.getElementById('searchArtistsSection');
+    const row = document.getElementById('searchArtistsRow');
+    const count = document.getElementById('searchArtistsCount');
+    if (!section || !row || !count) return;
 
-    list.querySelectorAll('.track-item').forEach(el => {
-      el.addEventListener('click', () => {
-        const track = this.searchOnlineResults.find(t => t.id === el.dataset.onlineId);
-        if (track) this.playOnlineTrack(track, this.searchOnlineResults);
+    const map = new Map();
+    for (const t of tracks) {
+      const name = (t.artist || '').trim();
+      if (!name || name.length < 2 || /unknown/i.test(name)) continue;
+      const e = map.get(name) || { name, n: 0, artwork: null };
+      e.n++;
+      if (!e.artwork && t.artwork) e.artwork = t.artwork;
+      map.set(name, e);
+    }
+
+    this.searchArtists = [...map.values()].sort((a, b) => b.n - a.n).slice(0, 8);
+
+    if (!this.searchArtists.length) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = '';
+    count.textContent = `${this.searchArtists.length} artis`;
+
+    row.innerHTML = this.searchArtists.map((a, i) => `
+      <div class="artist-chip" data-artist-index="${i}">
+        <div class="artist-chip-avatar">
+          ${a.artwork ? `<img src="${a.artwork}" alt="" loading="lazy" onerror="this.remove()">` : '<i class="fas fa-user"></i>'}
+        </div>
+        <div class="artist-chip-info">
+          <div class="artist-chip-name">${this.escapeHtml(a.name)}</div>
+          <div class="artist-chip-count">${a.n} lagu</div>
+        </div>
+      </div>`).join('');
+
+    row.querySelectorAll('.artist-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const idx = parseInt(chip.dataset.artistIndex, 10);
+        const artist = this.searchArtists[idx];
+        if (artist) this.openArtistPage(artist.name);
       });
     });
+  }
+
+  async openArtistPage(name) {
+    const container = this.dom.searchResults;
+    const artistInfo = this.searchArtists.find(a => a.name === name) || { artwork: null };
+
+    container.innerHTML = `
+      <div class="artist-page">
+        <button class="artist-back-btn" id="artistBackBtn">
+          <i class="fas fa-arrow-left"></i> Kembali ke pencarian
+        </button>
+        <div class="artist-hero">
+          <div class="artist-hero-avatar">
+            ${artistInfo.artwork ? `<img src="${artistInfo.artwork}" alt="" onerror="this.remove()">` : '<i class="fas fa-user"></i>'}
+          </div>
+          <div class="artist-hero-info">
+            <div class="artist-hero-label">Artis</div>
+            <h2>${this.escapeHtml(name)}</h2>
+            <p id="artistSongCount">Memuat lagu…</p>
+          </div>
+        </div>
+        <div class="track-list" id="artistTrackList">
+          <div class="loading-spinner"><i class="fas fa-spinner"></i><p>Memuat lagu…</p></div>
+        </div>
+      </div>`;
+
+    document.getElementById('artistBackBtn').addEventListener('click', () => this.closeArtistPage());
+
+    let tracks = [];
+    try {
+      tracks = await this.youtube.search(`${name} top songs`, 30);
+    } catch (err) {
+      console.warn('[Artist] Gagal memuat lagu artis:', err && err.message);
+      tracks = [];
+    }
+
+    const list = document.getElementById('artistTrackList');
+    const countEl = document.getElementById('artistSongCount');
+    if (!list || !document.body.contains(list)) return; // pengguna sudah menekan kembali
+
+    // Lagu yang benar-benar dari artis ini tampil lebih dulu.
+    tracks.sort((a, b) => (b.artist === name ? 1 : 0) - (a.artist === name ? 1 : 0));
+
+    countEl.textContent = `${tracks.length} lagu (dari pencarian online)`;
+
+    if (!tracks.length) {
+      list.innerHTML = '<div class="empty-state"><i class="fas fa-music"></i><p>Tidak ada lagu ditemukan untuk artis ini.</p></div>';
+      return;
+    }
+
+    this.artistTracks = tracks;
+    list.innerHTML = tracks.map((track, i) => this.onlineRowHtml(track, i)).join('');
+    this.wireOnlineRows(list, tracks);
+  }
+
+  closeArtistPage() {
+    // Kembalikan tampilan pencarian — hasil online diambil dari cache,
+    // jadi tampil instan.
+    this.ensureSearchSkeleton();
+    this.onSearchInput();
+    this.runOnlineSearch();
   }
 
   refreshSearchResults() {
@@ -1374,6 +2028,10 @@ class MusicPlayer {
     this.dom.playBtn.innerHTML = this.isPlaying
       ? '<i class="fas fa-pause"></i>'
       : '<i class="fas fa-play"></i>';
+
+    // Halaman Antrean / Sekarang Diputar.
+    this.renderNowPlaying();
+    this.renderQueue();
   }
 
   updateVolumeUI() {

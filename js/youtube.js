@@ -511,6 +511,68 @@ class YouTubeMusicAPI {
     }
   }
 
+  // ---------- Unduhan online (loader.to via relay lintas origin) ----------
+
+  /**
+   * Menyiapkan URL unduhan MP3 untuk sebuah video YouTube.
+   * loader.to tidak mengirim header CORS sehingga permintaan dilewatkan
+   * melalui relay teks (r.jina.ai dan cadangannya).
+   * @param {string} videoId
+   * @param {(pct:number)=>void} [onProgress]
+   * @returns {Promise<string>} URL file MP3 siap unduh
+   */
+  async getDownloadUrl(videoId, onProgress) {
+    const target = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+    const created = await this.fetchJsonViaRelay(
+      `https://loader.to/ajax/download.php?format=mp3&url=${encodeURIComponent(target)}`
+    );
+    if (!created || !created.id) throw new Error('Server unduhan tidak merespons');
+
+    const started = Date.now();
+    while (Date.now() - started < 150000) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      const data = await this.fetchJsonViaRelay(
+        `https://loader.to/ajax/progress.php?id=${encodeURIComponent(created.id)}`
+      );
+      if (!data) continue;
+
+      if (onProgress && typeof data.progress === 'number') {
+        onProgress(Math.min(99, Math.round(data.progress / 10)));
+      }
+      if (data.download_url) return data.download_url;
+      if (data.success === false) throw new Error(data.text || 'Konversi gagal');
+    }
+    throw new Error('Waktu konversi habis');
+  }
+
+  /**
+   * Mengambil JSON dari URL yang tidak mengizinkan CORS dengan mencoba
+   * beberapa relay teks secara berurutan.
+   */
+  async fetchJsonViaRelay(url) {
+    const relays = [
+      url,
+      `https://r.jina.ai/${url}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    ];
+
+    for (const relay of relays) {
+      try {
+        const res = await this.fetchWithTimeout(relay, { headers: { Accept: 'text/plain' } }, 30000);
+        if (!res.ok) continue;
+        const text = await res.text();
+        const start = text.indexOf('{');
+        if (start < 0) continue;
+        const data = JSON.parse(text.slice(start));
+        if (data && typeof data === 'object') return data;
+      } catch (err) {
+        /* coba relay berikutnya */
+      }
+    }
+    return null;
+  }
+
   // ---------- Pencarian & trending ----------
 
   async search(query, limit = 30) {

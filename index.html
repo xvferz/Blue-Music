@@ -33,6 +33,10 @@
           <i class="fas fa-compass"></i>
           <span>Jelajahi</span>
         </a>
+        <a href="#" class="nav-item" data-page="now">
+          <i class="fas fa-list-ul"></i>
+          <span>Antrean</span>
+        </a>
       </nav>
 
       <div class="playlist-section">
@@ -91,7 +95,7 @@
 
         <section class="content-section">
           <div class="section-header">
-            <h2>Semua Lagu</h2>
+            <h2 id="trackListTitle">Semua Lagu</h2>
             <span class="track-count" id="trackCount">0 lagu</span>
           </div>
           <div class="track-list" id="trackList">
@@ -183,6 +187,41 @@
           </div>
           <div class="track-list" id="exploreResults"></div>
         </section>
+      </div>
+
+      <!-- Now Playing / Queue Page -->
+      <div class="page" id="page-now">
+        <div class="now-layout">
+          <section class="now-visual-section">
+            <div class="album-visual" id="albumVisual">
+              <canvas class="np-canvas" id="npCanvas"></canvas>
+              <div class="album-art-frame">
+                <div class="album-art" id="npArtwork">
+                  <i class="fas fa-music"></i>
+                </div>
+              </div>
+              <div class="np-meta">
+                <div class="np-badge"><i class="fas fa-wave-square"></i> Visualizer</div>
+                <div class="np-title" id="npTitle">Belum ada lagu</div>
+                <div class="np-artist" id="npArtist">Pilih lagu untuk mulai</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="queue-panel">
+            <div class="queue-header">
+              <h3><i class="fas fa-list-ul"></i> Antrean</h3>
+              <div class="queue-header-actions">
+                <span class="queue-count" id="queueCount">0 lagu</span>
+                <button class="queue-clear-btn" id="clearQueueBtn" title="Bersihkan antrean">
+                  <i class="fas fa-trash-alt"></i>
+                </button>
+              </div>
+            </div>
+            <div class="queue-now" id="queueNow"></div>
+            <div class="queue-list" id="queueList"></div>
+          </section>
+        </div>
       </div>
     </main>
 
