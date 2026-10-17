@@ -8,6 +8,7 @@ class MusicPlayer {
     this.isPlaying = false;
     this.isLoadingTrack = false;
     this.streamFallbackAttempted = false;
+    this.streamUnavailable = false;
     this.shuffleOn = false;
     this.repeatMode = 'off';
     this.volume = 0.7;
@@ -387,8 +388,8 @@ class MusicPlayer {
         <div class="empty-state">
           <i class="fas fa-exclamation-triangle"></i>
           <p>Gagal mencari lagu.</p>
-          <p style="font-size:13px;margin-top:8px">Server publik sedang tidak bisa diakses dari browser.</p>
-          <p style="font-size:13px;margin-top:4px">Tips: aktifkan pencarian yang andal dengan YouTube Data API key gratis — petunjuk ada di <code>js/youtube.js</code>.</p>
+          <p style="font-size:13px;margin-top:8px">Semua server publik sedang sibuk atau tidak bisa diakses.</p>
+          <p style="font-size:13px;margin-top:4px">Coba lagi sebentar lagi, atau isi <code>YT_DATA_API_KEY</code> di <code>js/youtube.js</code> untuk pencarian yang selalu andal.</p>
         </div>`;
       console.error(error);
     }
@@ -411,23 +412,29 @@ class MusicPlayer {
     this.updatePlayerUI();
     this.render();
 
-    // Jalur 1: stream langsung via Invidious (kualitas & kontrol penuh).
-    const candidates = this.youtube.getStreamUrls(track.videoId);
-    const result = await this.player.playStream(candidates);
+    // Jalur 1: stream audio mentah (kalau server stream masih memungkinkan).
+    if (!this.streamUnavailable) {
+      const candidates = this.youtube.getStreamUrls(track.videoId);
+      const result = await this.player.playStream(candidates);
 
-    if (result.aborted) return;
+      if (result.aborted) return;
 
-    if (result.ok) {
-      this.youtube.rememberStreamInstance(result.instance);
-      this.isLoadingTrack = false;
-      this.isPlaying = true;
-      this.updatePlayerUI();
-      this.render();
-      return;
+      if (result.ok) {
+        this.youtube.rememberStreamInstance(result.instance);
+        this.isLoadingTrack = false;
+        this.isPlaying = true;
+        this.updatePlayerUI();
+        this.render();
+        return;
+      }
+
+      // Sekali gagal → untuk sesi ini langsung pakai embed, supaya tidak
+      // menunggu timeout di setiap lagu. Muat ulang halaman untuk coba lagi.
+      this.streamUnavailable = true;
     }
 
     // Jalur 2: embed YouTube — (hampir) selalu bisa memutar.
-    console.warn('[Player] Tidak ada server stream yang bekerja, beralih ke embed.');
+    console.warn('[Player] Stream mentah tidak tersedia, memakai embed YouTube.');
     try {
       await this.player.playEmbed(track.videoId);
       this.isLoadingTrack = false;

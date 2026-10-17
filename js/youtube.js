@@ -1,19 +1,19 @@
 /**
- * YouTubeMusicAPI — pencarian & metadata via YouTube Data API (opsional) + instance Invidious publik.
+ * YouTubeMusicAPI — pencarian & metadata, tanpa server & tanpa key.
  *
- * Prinsip kerja:
- *  - Kalau YT_DATA_API_KEY diisi (lihat KONFIGURASI di bawah), pencarian memakai
- *    YouTube Data API resmi — 100% andal dari browser, gratis ~100 pencarian/hari.
- *  - Tanpa key, dipakai instance Invidious publik dengan health probe + fallback
- *    berlapis. PENTING: sejak 2026 mayoritas instance publik diblokir untuk
- *    browser oleh sistem anti-bot (Anubis) sehingga jalur ini sering gagal —
- *    mengisi API key sangat disarankan.
+ * Urutan penyedia (dicoba berurutan sampai salah satu berhasil):
+ *  1. YouTube Data API v3 — kalau YT_DATA_API_KEY diisi (opsional, paling andal).
+ *  2. Instance Piped publik — jalur utama tanpa key. Terbukti CORS-aman dan
+ *     bisa dipanggil lintas origin dari browser (dites langsung di Chromium).
+ *  3. Relay r.jina.ai → instance Invidious — cadangan saat Piped tumbang.
+ *  4. Instance Invidious langsung — dipertahankan untuk lingkungan yang bisa
+ *     mengaksesnya (banyak instance memasang tembok anti-bot untuk browser).
+ *  5. Cache lama (24 jam) — supaya pencarian yang pernah dilakukan tetap jalan.
+ *
+ * Catatan:
+ *  - Stream audio mentah (latest_version) umumnya diblokir untuk browser;
+ *    pemutaran berjalan lewat embed YouTube (lihat player-engine.js).
  *  - Server yang terbukti bekerja diingat di localStorage.
- *  - Hasil pencarian di-cache 24 jam, sehingga saat jaringan server bermasalah
- *    pencarian yang pernah dilakukan tetap bisa ditampilkan.
- *  - Pemutaran audio TIDAK diurus di sini: class ini hanya memberi daftar
- *    URL stream (latest_version) untuk dicoba oleh PlaybackEngine.
- *    Kalau tidak ada yang bisa streaming, PlaybackEngine memakai embed YouTube.
  */
 
 // ================== KONFIGURASI ==================
@@ -52,6 +52,19 @@ class YouTubeMusicAPI {
     if (saved) this.instances = this.dedupe([saved, ...this.instances]);
     const savedStream = this.storeGet('bluesync_stream_instance');
     if (savedStream) this.streamInstance = savedStream;
+
+    // Instance Piped — penyedia pencarian utama tanpa key (CORS-aman di browser).
+    // Yang mati akan dilewati otomatis oleh health check saat pencarian pertama.
+    this.pipedInstances = [
+      'https://api.piped.private.coffee',
+      'https://pipedapi.ducks.party',
+      'https://pipedapi.adminforge.de',
+      'https://pipedapi.orangenet.cc',
+      'https://pipedapi.reallyaweso.me',
+    ];
+    this.pipedInstance = null;
+    const savedPiped = this.storeGet('bluesync_piped_instance');
+    if (savedPiped) this.pipedInstance = savedPiped;
   }
 
   // ---------- Penyimpanan kecil yang aman ----------
@@ -114,6 +127,24 @@ class YouTubeMusicAPI {
       } catch (err) {
         console.warn('[YouTube] Gagal mengambil daftar server dinamis, memakai server bawaan.');
       }
+
+      // Sekalian segarkan daftar Piped dari dokumentasi resminya (kalau bisa).
+      try {
+        const res = await this.fetchWithTimeout(
+          'https://raw.githubusercontent.com/TeamPiped/documentation/main/content/docs/public-instances/index.md',
+          { headers: { Accept: 'text/plain' } },
+          8000
+        );
+        if (res.ok) {
+          const text = await res.text();
+          const urls = [...text.matchAll(/https:\/\/[a-z0-9.-]+/gi)]
+            .map(m => m[0].replace(/[.,;:)]+$/, ''))
+            .filter(u => /^https:\/\/(api\.|pipedapi\.)/i.test(u));
+          if (urls.length) {
+            this.pipedInstances = this.dedupe([...urls, ...this.pipedInstances]).slice(0, 10);
+          }
+        }
+      } catch (err) { /* pakai daftar bawaan */ }
     })();
 
     return this.dynamicPromise;
@@ -368,6 +399,118 @@ class YouTubeMusicAPI {
     };
   }
 
+  // ---------- Piped (jalur pencarian utama tanpa key) ----------
+
+  getPipedCandidates() {
+    const remembered = this.storeGet('bluesync_piped_instance');
+    return this.dedupe([this.pipedInstance, remembered, ...this.pipedInstances]).slice(0, 8);
+  }
+
+  async tryPipedSearch(base, query, timeoutMs = 9000) {
+    try {
+      const res = await this.fetchWithTimeout(
+        `${base}/search?q=${encodeURIComponent(query)}&filter=music_songs`,
+        { headers: { Accept: 'application/json' } },
+        timeoutMs
+      );
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data || !Array.isArray(data.items)) throw new Error('Format respons tidak dikenal');
+      return data.items
+        .filter(item => item && typeof item.url === 'string' && item.url.includes('v='))
+        .map(item => this.mapPipedItem(item));
+    } catch (err) {
+      console.warn(`[YouTube] Piped ${base} gagal:`, err && err.message);
+      return null;
+    }
+  }
+
+  async pipedSearch(query, limit = 30) {
+    const candidates = this.getPipedCandidates();
+    if (!candidates.length) return null;
+
+    // Coba server yang diingat dulu — pencarian ini sekaligus health check.
+    const direct = await this.tryPipedSearch(candidates[0], query);
+    if (direct) {
+      this.setPipedInstance(candidates[0]);
+      return direct.slice(0, limit);
+    }
+    this.pipedInstance = null;
+    this.storeDel('bluesync_piped_instance');
+
+    // Balapan kandidat lainnya; yang pertama berhasil menang.
+    const rest = candidates.slice(1);
+    if (!rest.length) return null;
+    console.log(`[YouTube] Mencari server Piped aktif dari ${rest.length} kandidat…`);
+    try {
+      const winner = await Promise.any(rest.map(base =>
+        this.tryPipedSearch(base, query).then(tracks => {
+          if (!tracks || !tracks.length) throw new Error('kosong');
+          return { base, tracks };
+        })
+      ));
+      this.setPipedInstance(winner.base);
+      return winner.tracks.slice(0, limit);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  setPipedInstance(base) {
+    const changed = this.pipedInstance !== base;
+    this.pipedInstance = base;
+    this.storeSet('bluesync_piped_instance', base);
+    if (changed) console.log(`[YouTube] Server Piped aktif: ${base}`);
+  }
+
+  mapPipedItem(item) {
+    const videoId = (String(item.url).split('v=')[1] || '').split('&')[0];
+    return {
+      id: `yt_${videoId}`,
+      source: 'youtube',
+      videoId,
+      title: item.title || 'Unknown Title',
+      artist: item.uploaderName || 'Unknown Artist',
+      artistId: item.uploaderUrl || '',
+      duration: Number(item.duration) || 0,
+      url: null,
+      streamUrl: null,
+      artwork: videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : null,
+      viewCount: item.views || 0,
+      publishedText: item.uploadedDate || '',
+      liked: false,
+      dateAdded: Date.now(),
+    };
+  }
+
+  // ---------- Relay r.jina.ai (cadangan lintas origin) ----------
+
+  async jinaSearch(query, limit = 30) {
+    try {
+      const base = this.getPreferredInstance() || 'https://invidious.f5.si';
+      const target = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&page=1&sort=relevance`;
+      const res = await this.fetchWithTimeout(
+        `https://r.jina.ai/${target}`,
+        { headers: { Accept: 'text/plain' } },
+        20000
+      );
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const text = await res.text();
+      const start = text.indexOf('[');
+      if (start < 0) throw new Error('Bukan JSON');
+      const data = JSON.parse(text.slice(start));
+      if (!Array.isArray(data)) throw new Error('Format tidak dikenal');
+      return data
+        .filter(v => v && v.videoId)
+        .slice(0, 30)
+        .map(v => this.mapVideo(v))
+        .slice(0, limit);
+    } catch (err) {
+      console.warn('[YouTube] Relay jina gagal:', err && err.message);
+      return null;
+    }
+  }
+
   // ---------- Pencarian & trending ----------
 
   async search(query, limit = 30) {
@@ -384,8 +527,23 @@ class YouTubeMusicAPI {
       console.warn('[YouTube] Data API tidak tersedia, beralih ke instance publik…');
     }
 
-    // Upaya 1: langsung ke server yang diingat — pencarian itu sendiri
-    // sekaligus jadi health check, jadi tidak ada probe ganda.
+    // Upaya 1: Piped — jalur utama tanpa key, terbukti CORS-aman di browser.
+    this.loadDynamicInstances(); // segarkan kandidat di latar (tidak ditunggu)
+    const pipedTracks = await this.pipedSearch(query, limit);
+    if (pipedTracks) {
+      if (pipedTracks.length) this.cacheSearch(query, pipedTracks);
+      return pipedTracks.slice(0, limit);
+    }
+
+    // Upaya 2: relay r.jina.ai → Invidious (cadangan lintas origin).
+    const relayed = await this.jinaSearch(query, limit);
+    if (relayed) {
+      if (relayed.length) this.cacheSearch(query, relayed);
+      return relayed.slice(0, limit);
+    }
+
+    // Upaya 3: langsung ke instance Invidious yang diingat — pencarian itu
+    // sendiri sekaligus health check, jadi tidak ada probe ganda.
     const direct = this.getPreferredInstance();
     if (direct) {
       const tracks = await this.trySearch(direct, query);
@@ -397,7 +555,7 @@ class YouTubeMusicAPI {
       this.invalidateSearchInstance();
     }
 
-    // Upaya 2: balapan health probe semua kandidat, lalu cari di pemenang.
+    // Upaya 4: balapan health probe semua kandidat Invidious, lalu cari di pemenang.
     try {
       const inst = await this.getSearchInstance();
       const tracks = await this.trySearch(inst, query);
@@ -410,7 +568,7 @@ class YouTubeMusicAPI {
       console.warn('[YouTube]', e && e.message);
     }
 
-    // Upaya 3: hasil cache lama (kalau ada).
+    // Upaya 5: hasil cache lama (kalau ada).
     const stale = this.getCachedSearch(query, true);
     if (stale) {
       console.warn('[YouTube] Memakai cache lama untuk:', query);
@@ -441,27 +599,8 @@ class YouTubeMusicAPI {
       }
     }
 
-    // Upaya 1: endpoint trending resmi instance.
-    // Sanity filter: buang siaran langsung / video tanpa durasi —
-    // sebagian instance tidak benar-benar memfilter kategori musik.
-    const direct = this.getPreferredInstance();
-    if (direct) {
-      const data = await this.tryFetchJson(`${direct}/api/v1/trending?type=music`, 10000);
-      if (Array.isArray(data)) {
-        const tracks = data
-          .filter(v => v && v.videoId && Number(v.lengthSeconds) > 60)
-          .slice(0, 24)
-          .map(v => this.mapVideo(v));
-        if (tracks.length >= 6) {
-          this.setSearchInstance(direct);
-          this.storeSet('bluesync_trending', JSON.stringify({ ts: Date.now(), tracks }));
-          return tracks;
-        }
-      }
-    }
-
-    // Upaya 2: trending diganti pencarian kurasi (server ini tidak punya
-    // feed musik yang benar — lebih baik hasil musik sungguhan).
+    // Upaya 1: pencarian kurasi lewat jalur Piped/relay. Feed "trending"
+    // milik instance publik isinya sering bukan musik, jadi tidak dipakai.
     try {
       const tracks = await this.search('top hits music', 24);
       if (tracks.length) {
@@ -470,7 +609,7 @@ class YouTubeMusicAPI {
       }
     } catch (e) { /* lanjut ke cache lama */ }
 
-    // Upaya 3: cache trending lama.
+    // Upaya 2: cache trending lama.
     if (cached && Array.isArray(cached.tracks) && cached.tracks.length) {
       return cached.tracks;
     }

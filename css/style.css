@@ -1300,14 +1300,23 @@ html, body {
 }
 
 /* ==== YouTube IFrame Player tersembunyi (fallback pemutaran) ==== */
-.yt-embed-host {
+/* PENTING: API YouTube MENGGANTI #ytEmbedHost dengan <iframe>, jadi
+   penyembunyian dilakukan oleh pembungkusnya, bukan elemen hostnya. */
+.yt-embed-wrap {
   position: fixed;
   width: 2px;
   height: 2px;
-  left: -20px;
-  bottom: -20px;
+  left: 0;
+  bottom: 0;
   opacity: 0.01;
+  overflow: hidden;
   pointer-events: none;
   border: 0;
-  z-index: -1;
+  z-index: 0;
+}
+
+.yt-embed-wrap iframe {
+  width: 2px;
+  height: 2px;
+  border: 0;
 }
