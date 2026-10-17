@@ -561,6 +561,25 @@ html, body {
   gap: 2px;
 }
 
+/* Seksi hasil pencarian (lokal + online) */
+.search-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-section + .search-section {
+  margin-top: 28px;
+}
+
+.search-section .section-header {
+  margin-bottom: 12px;
+}
+
+.search-section .section-header h2 {
+  font-size: 18px;
+}
+
 /* Library */
 .library-header {
   margin-bottom: 24px;

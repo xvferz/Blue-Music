@@ -31,11 +31,13 @@ class PlaybackEngine {
     this.volume = 0.7;
     this.muted = false;
     this.loadToken = 0;              // membatalkan pemuatan stream yang sudah basi
+    this.streamProbing = false;      // true selama kandidat stream dicoba satu per satu
     this.listeners = {};
 
     this.ytPlayer = null;
     this.ytApiPromise = null;
     this.ytReady = false;
+    this.embedVideoId = null;
 
     // Kejadian dari elemen audio.
     this.localAudio.addEventListener('loadedmetadata', () => {
@@ -57,7 +59,7 @@ class PlaybackEngine {
     this.streamAudio.addEventListener('error', () => {
       // Kesalahan saat pemuatan kandidat ditangani di tryStreamCandidate;
       // yang sampai ke sini adalah kegagalan saat lagu sedang berjalan.
-      if (this.mode === 'stream' && this.streamAudio.currentSrc) {
+      if (this.mode === 'stream' && this.streamAudio.currentSrc && !this.streamProbing) {
         this.emit('streamerror');
       }
     });
@@ -205,21 +207,28 @@ class PlaybackEngine {
   async playStream(candidates) {
     this.stopAll();
     this.mode = 'stream';
+    this.streamProbing = true;
     const token = this.loadToken;
 
     if (!candidates || !candidates.length) {
+      this.streamProbing = false;
       return { ok: false, mode: 'stream' };
     }
 
     for (const candidate of candidates) {
-      if (token !== this.loadToken) return { ok: false, aborted: true };
+      if (token !== this.loadToken) {
+        this.streamProbing = false;
+        return { ok: false, aborted: true };
+      }
       const ok = await this.tryStreamCandidate(candidate, token);
       if (ok) {
+        this.streamProbing = false;
         if (token !== this.loadToken) return { ok: false, aborted: true };
         return { ok: true, mode: 'stream', instance: candidate.instance };
       }
     }
 
+    this.streamProbing = false;
     return { ok: false, mode: 'stream' };
   }
 
@@ -271,6 +280,7 @@ class PlaybackEngine {
   async playEmbed(videoId) {
     this.stopAll();
     this.mode = 'embed';
+    this.embedVideoId = videoId;
     await this.ensureYT();
     if (!this.ytPlayer) throw new Error('IFrame API tidak tersedia');
     this.applyEmbedVolume();
@@ -356,6 +366,6 @@ class PlaybackEngine {
 
   onYTError(e) {
     if (this.mode !== 'embed') return;
-    this.emit('embederror', e.data);
+    this.emit('embederror', { code: e.data, videoId: this.embedVideoId });
   }
 }

@@ -19,6 +19,11 @@ class MusicPlayer {
     this.animFrameId = null;
     this.youtube = new YouTubeMusicAPI();
     this.activePlaylist = 'all';
+    this.searchDebounceId = null;
+    this.searchToken = 0;
+    this.searchOnlineResults = [];
+    this.onlineQueue = [];
+    this.embedSkipCount = 0;
 
     this.init();
   }
@@ -107,7 +112,7 @@ class MusicPlayer {
     this.player.on('paused', () => this.onPaused());
     this.player.on('localerror', () => this.onLocalError());
     this.player.on('streamerror', () => this.onStreamError());
-    this.player.on('embederror', (code) => this.onEmbedError(code));
+    this.player.on('embederror', (info) => this.onEmbedError(info));
 
     this.dom.playBtn.addEventListener('click', () => this.togglePlay());
     this.dom.prevBtn.addEventListener('click', () => this.prevTrack());
@@ -136,7 +141,14 @@ class MusicPlayer {
     document.addEventListener('dragover', (e) => e.preventDefault());
     document.addEventListener('drop', (e) => this.handleDrop(e));
 
-    this.dom.searchInput.addEventListener('input', () => this.searchLocal());
+    this.dom.searchInput.addEventListener('input', () => this.onSearchInput());
+    this.dom.searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(this.searchDebounceId);
+        this.runOnlineSearch();
+      }
+    });
 
     this.dom.filterBtns.forEach(btn => {
       btn.addEventListener('click', () => {
@@ -336,7 +348,7 @@ class MusicPlayer {
       card.addEventListener('click', () => {
         const onlineId = card.dataset.onlineId;
         const track = this.onlineTracks.find(t => t.id === onlineId);
-        if (track) this.playOnlineTrack(track);
+        if (track) this.playOnlineTrack(track, this.onlineTracks);
       });
     });
   }
@@ -378,7 +390,7 @@ class MusicPlayer {
       container.querySelectorAll('.track-item').forEach(el => {
         el.addEventListener('click', (e) => {
           const track = this.onlineTracks.find(t => t.id === el.dataset.onlineId);
-          if (track) this.playOnlineTrack(track);
+          if (track) this.playOnlineTrack(track, this.onlineTracks);
         });
       });
       
@@ -394,7 +406,10 @@ class MusicPlayer {
       console.error(error);
     }
   }
-  async playOnlineTrack(track) {
+  async playOnlineTrack(track, queue = null, auto = false) {
+    if (!auto) this.embedSkipCount = 0;
+    this.onlineQueue = queue || [];
+
     if (this.audioCtx && this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
     }
@@ -716,10 +731,12 @@ class MusicPlayer {
   onPlaying() {
     this.isPlaying = true;
     this.isLoadingTrack = false;
+    this.embedSkipCount = 0;
     const track = this.tracks[this.currentIndex];
     if (track && track.isOnline) this.saveRecentOnline(track);
     this.updatePlayerUI();
     this.render();
+    this.refreshSearchResults();
   }
 
   onPaused() {
@@ -746,6 +763,7 @@ class MusicPlayer {
     // Stream putus di tengah lagu — lanjutkan lewat embed dengan lagu yang sama.
     const track = this.tracks[this.currentIndex];
     if (!track || !track.isOnline || this.streamFallbackAttempted) return;
+    if (this.isLoadingTrack) return; // alur pemuatan normal sedang menangani ini
     this.streamFallbackAttempted = true;
     console.warn('[Player] Stream terputus, beralih ke embed…');
     this.isLoadingTrack = true;
@@ -762,14 +780,58 @@ class MusicPlayer {
       });
   }
 
-  onEmbedError(code) {
-    this.isLoadingTrack = false;
+  onEmbedError(info) {
+    const code = info && info.code;
+    const videoId = info && info.videoId;
     const track = this.tracks[this.currentIndex];
-    if (track && track.isOnline) {
-      console.warn('[Player] Embed error, kode:', code);
-      this.showToast('Lagu ini tidak bisa diputar (dibatasi YouTube). Melewati…');
-      this.nextTrack();
+
+    if (!track || !track.isOnline) return;
+    // Abaikan laporan basi dari lagu yang sudah diganti.
+    if (videoId && track.videoId && track.videoId !== videoId) return;
+
+    console.warn('[Player] Embed error, kode:', code);
+    this.isLoadingTrack = false;
+
+    if (this.embedSkipCount >= 4) {
+      this.isPlaying = false;
+      this.embedSkipCount = 0;
+      this.showToast('Beberapa lagu ini diblokir YouTube. Coba lagu lain.');
+      this.updatePlayerUI();
+      this.refreshSearchResults();
+      return;
     }
+
+    const next = this.getNextOnlineCandidate();
+    if (!next) {
+      this.isPlaying = false;
+      this.showToast('Lagu ini tidak bisa diputar (dibatasi YouTube).');
+      this.updatePlayerUI();
+      this.refreshSearchResults();
+      return;
+    }
+
+    this.embedSkipCount++;
+    this.showToast('Lagu dibatasi YouTube — mencoba lagu berikutnya…');
+    const queue = this.onlineQueue;
+    this.playOnlineTrack(next, queue.length ? queue : null, true);
+  }
+
+  getNextOnlineCandidate() {
+    const current = this.tracks[this.currentIndex];
+
+    // 1) Dari daftar hasil pencarian/jelajahi yang sedang dilihat.
+    if (this.onlineQueue.length && current) {
+      const i = this.onlineQueue.findIndex(t => t.id === current.id);
+      if (i >= 0 && i + 1 < this.onlineQueue.length) return this.onlineQueue[i + 1];
+      return null;
+    }
+
+    // 2) Cadangan: lagu online berikutnya di daftar utama.
+    for (let i = this.currentIndex + 1; i < this.tracks.length; i++) {
+      const t = this.tracks[i];
+      if (t.isOnline || t.source === 'youtube') return t;
+    }
+    return null;
   }
 
   handleKeyboard(e) {
@@ -1044,36 +1106,109 @@ class MusicPlayer {
     }
   }
 
-  searchLocal() {
-    const query = this.dom.searchInput.value.toLowerCase().trim();
-    const container = this.dom.searchResults;
+  // --- Pencarian (halaman Cari): pustaka lokal + online ---
+
+  onSearchInput() {
+    const query = this.dom.searchInput.value.trim();
+    clearTimeout(this.searchDebounceId);
 
     if (!query) {
-      container.innerHTML = `
-        <div class="empty-state">
-          <i class="fas fa-search"></i>
-          <p>Cari lagu dari pustaka lokal dan online</p>
-        </div>`;
+      this.searchToken++; // batalkan hasil online yang sedang diproses
+      this.renderSearchIdle();
       return;
     }
 
+    this.ensureSearchSkeleton();
+    this.renderSearchLocalPart(query);
+
+    if (query.length < 2) {
+      this.renderSearchOnlineHint();
+      return;
+    }
+
+    this.renderSearchOnlineLoading();
+
+    // Tunggu sampai ketikan berhenti sebentar, baru panggil server.
+    this.searchDebounceId = setTimeout(() => this.runOnlineSearch(), 650);
+  }
+
+  async runOnlineSearch() {
+    const query = this.dom.searchInput.value.trim();
+
+    if (query.length < 2) {
+      this.renderSearchOnlineHint();
+      return;
+    }
+
+    this.ensureSearchSkeleton();
+    this.renderSearchLocalPart(query);
+    const token = ++this.searchToken;
+    this.renderSearchOnlineLoading();
+
+    try {
+      const tracks = await this.youtube.search(query, 30);
+      if (token !== this.searchToken) return; // sudah ada pencarian yang lebih baru
+      this.searchOnlineResults = tracks;
+      this.renderSearchOnlinePart(query, tracks);
+    } catch (err) {
+      if (token !== this.searchToken) return;
+      console.warn('[Search] Gagal mencari online:', err);
+      this.renderSearchOnlinePart(query, null);
+    }
+  }
+
+  renderSearchIdle() {
+    this.searchOnlineResults = [];
+    this.dom.searchResults.innerHTML = `
+      <div class="empty-state">
+        <i class="fas fa-search"></i>
+        <p>Cari lagu dari pustaka lokal dan online</p>
+      </div>`;
+  }
+
+  ensureSearchSkeleton() {
+    if (this.dom.searchResults.querySelector('#searchOnlineResults')) return;
+
+    this.dom.searchResults.innerHTML = `
+      <div class="search-section" id="searchLocalSection" style="display:none">
+        <div class="section-header">
+          <h2>Pustaka Kamu</h2>
+          <span class="track-count" id="searchLocalCount"></span>
+        </div>
+        <div class="track-list" id="searchLocalResults"></div>
+      </div>
+      <div class="search-section">
+        <div class="section-header">
+          <h2>Hasil Online</h2>
+          <span class="track-count" id="searchOnlineCount"></span>
+        </div>
+        <div class="track-list" id="searchOnlineResults"></div>
+      </div>`;
+  }
+
+  renderSearchLocalPart(query) {
+    const section = document.getElementById('searchLocalSection');
+    const list = document.getElementById('searchLocalResults');
+    const count = document.getElementById('searchLocalCount');
+    if (!section || !list || !count) return;
+
+    const q = query.toLowerCase();
     const results = this.tracks.filter(t =>
       !t.isOnline && t.source !== 'youtube' &&
-      (t.title.toLowerCase().includes(query) ||
-       t.artist.toLowerCase().includes(query))
+      (t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q))
     );
 
     if (!results.length) {
-      container.innerHTML = `
-        <div class="empty-state">
-          <i class="fas fa-search"></i>
-          <p>Tidak ditemukan hasil untuk "${this.escapeHtml(query)}"</p>
-          <p style="margin-top:8px;font-size:13px">Coba cari di <a href="#" onclick="document.querySelector('[data-page=explore]').click();setTimeout(()=>document.getElementById('exploreSearchInput').value='${this.escapeHtml(query)}',100)" style="color:var(--accent-primary)">Jelajahi Online</a></p>
-        </div>`;
+      section.style.display = 'none';
+      list.innerHTML = '';
+      count.textContent = '';
       return;
     }
 
-    container.innerHTML = results.map(track => {
+    section.style.display = '';
+    count.textContent = `${results.length} hasil`;
+
+    list.innerHTML = results.map(track => {
       const idx = this.tracks.indexOf(track);
       const isPlaying = idx === this.currentIndex;
 
@@ -1096,7 +1231,7 @@ class MusicPlayer {
         </div>`;
     }).join('');
 
-    container.querySelectorAll('.track-item').forEach(el => {
+    list.querySelectorAll('.track-item').forEach(el => {
       el.addEventListener('click', (e) => {
         if (e.target.closest('.track-actions')) return;
         const idx = parseInt(el.dataset.index);
@@ -1104,7 +1239,7 @@ class MusicPlayer {
       });
     });
 
-    container.querySelectorAll('.track-like-btn').forEach(btn => {
+    list.querySelectorAll('.track-like-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const track = this.tracks.find(t => t.id === btn.dataset.id);
@@ -1123,11 +1258,11 @@ class MusicPlayer {
       });
     });
 
-    container.querySelectorAll('.track-dl-btn').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+    list.querySelectorAll('.track-dl-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
         e.stopPropagation();
         const track = this.tracks.find(t => t.id === btn.dataset.id);
-        if (track) {
+        if (track && !track.isOnline && track.source !== 'youtube') {
           const a = document.createElement('a');
           a.href = track.url;
           a.download = track.title + '.mp3';
@@ -1137,6 +1272,82 @@ class MusicPlayer {
         }
       });
     });
+  }
+
+  renderSearchOnlineHint() {
+    const list = document.getElementById('searchOnlineResults');
+    const count = document.getElementById('searchOnlineCount');
+    if (!list || !count) return;
+    count.textContent = '';
+    list.innerHTML = '<div class="empty-state"><i class="fas fa-keyboard"></i><p>Ketik minimal 2 huruf untuk mencari online…</p></div>';
+  }
+
+  renderSearchOnlineLoading() {
+    const list = document.getElementById('searchOnlineResults');
+    const count = document.getElementById('searchOnlineCount');
+    if (!list || !count) return;
+    count.textContent = '';
+    list.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner"></i><p>Mencari online...</p></div>';
+  }
+
+  renderSearchOnlinePart(query, tracks) {
+    const list = document.getElementById('searchOnlineResults');
+    const count = document.getElementById('searchOnlineCount');
+    if (!list || !count) return;
+
+    if (tracks === null) {
+      count.textContent = '';
+      list.innerHTML = `
+        <div class="empty-state">
+          <i class="fas fa-exclamation-triangle"></i>
+          <p>Gagal mencari lagu online.</p>
+          <p style="font-size:13px;margin-top:8px">Semua server publik sedang sibuk — coba lagi sebentar lagi.</p>
+        </div>`;
+      return;
+    }
+
+    if (!tracks.length) {
+      count.textContent = '0 hasil';
+      list.innerHTML = `<div class="empty-state"><i class="fas fa-search"></i><p>Tidak ditemukan hasil untuk "${this.escapeHtml(query)}"</p></div>`;
+      return;
+    }
+
+    count.textContent = `${tracks.length} hasil`;
+
+    const current = this.currentIndex >= 0 ? this.tracks[this.currentIndex] : null;
+
+    list.innerHTML = tracks.map((track, i) => {
+      const duration = track.duration ? this.formatTime(track.duration) : '--:--';
+      const isPlaying = current && current.id === track.id;
+
+      return `
+        <div class="track-item ${isPlaying ? 'playing' : ''}" data-online-id="${track.id}">
+          <span class="track-index">${isPlaying ? '<i class="fas fa-volume-up" style="color:var(--accent-primary)"></i>' : (i + 1)}</span>
+          <div class="track-info">
+            <div class="track-name">${this.highlightMatch(this.escapeHtml(track.title), query)}</div>
+            <div class="track-artist-name">${this.highlightMatch(this.escapeHtml(track.artist), query)} <span class="track-source">YouTube</span></div>
+          </div>
+          <span class="track-duration">${duration}</span>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.track-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const track = this.searchOnlineResults.find(t => t.id === el.dataset.onlineId);
+        if (track) this.playOnlineTrack(track, this.searchOnlineResults);
+      });
+    });
+  }
+
+  refreshSearchResults() {
+    const query = this.dom.searchInput.value.trim();
+    if (!query) return;
+    if (!this.dom.searchResults.querySelector('#searchOnlineResults')) return;
+
+    this.renderSearchLocalPart(query);
+    if (this.searchOnlineResults.length) {
+      this.renderSearchOnlinePart(query, this.searchOnlineResults);
+    }
   }
 
   highlightMatch(text, query) {
